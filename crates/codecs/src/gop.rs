@@ -738,6 +738,7 @@ impl GopCache {
             return Err(CodecError::Decode("no video decoder".into()));
         };
         decoder.set_draft(draft);
+        let mut retried = false;
         while st.next < limit {
             if filmcraft_media::cancel::cancelled() {
                 // The decoder state stays consistent (`next`, `out_max`): a later request continues.
@@ -753,7 +754,29 @@ impl GopCache {
             let Some(decoder) = st.decoder.as_mut() else {
                 return Err(CodecError::Decode("no video decoder".into()));
             };
-            let out = timed(|| decoder.decode(&data, s.pts(k)))?;
+            let out = match timed(|| decoder.decode(&data, s.pts(k))) {
+                Ok(out) => out,
+                Err(e) if continuing && !retried => {
+                    log::warn!("decoder failed mid-GOP at sample {k} ({e}): restarting from sync sample {key}");
+                    retried = true;
+                    let mut restart = key;
+                    while restart > 0 {
+                        let data = s.read(restart)?;
+                        if st.decoder.as_ref().and_then(|d| d.is_random_access(&data)) != Some(false) {
+                            break;
+                        }
+                        restart = s.sync_before(restart - 1);
+                    }
+                    if let Some(d) = st.decoder.as_mut() {
+                        d.reset();
+                    }
+                    st.next = restart;
+                    st.start = restart;
+                    st.out_max = i64::MIN;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             st.next += 1;
             DECODED.fetch_add(1, Ordering::Relaxed);
             self.store_output(st, out);
@@ -813,10 +836,29 @@ impl GopCache {
         let limit = (i + 64).min(n);
         let mut out = Vec::new();
         let mut found = false;
+        let mut retried = false;
         while *next < limit {
             let k = *next;
             let data = s.read(k)?;
-            let pics = timed(|| d.decode(&data, s.pts(k)))?;
+            let pics = match timed(|| d.decode(&data, s.pts(k))) {
+                Ok(pics) => pics,
+                Err(e) if continuing && !retried => {
+                    log::warn!("decoder failed mid-GOP at sample {k} ({e}): restarting from sync sample {key}");
+                    retried = true;
+                    let mut restart = key;
+                    while restart > 0 {
+                        let data = s.read(restart)?;
+                        if d.is_random_access(&data) != Some(false) {
+                            break;
+                        }
+                        restart = s.sync_before(restart - 1);
+                    }
+                    d.reset();
+                    *next = restart;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             count_frames(&pics);
             *next += 1;
             found |= pics.iter().any(|p| p.pts == want_pts);

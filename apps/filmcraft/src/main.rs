@@ -130,13 +130,7 @@ fn main() -> eframe::Result {
     if graphics.mode() == graphics::Mode::Default {
         register_gpu_frame_renderer();
     }
-    #[cfg(target_os = "linux")]
-    let x11 = launch.x11 || (!launch.wayland && std::env::var_os("FILMCRAFT_WAYLAND").is_none() && std::env::var_os("DISPLAY").is_some());
-    #[cfg(not(target_os = "linux"))]
-    let x11 = false;
-    if x11 {
-        log::info!("running via X11 / XWayland backend (file drag-and-drop enabled)");
-    }
+    let x11 = launch.x11 || std::env::var_os("FILMCRAFT_X11").is_some();
     let started = loop {
         let mut options = native_options(launch.control_port.is_some(), x11);
         // Before eframe creates the wgpu instance (e.g. no OpenGL on Windows, see graphics.rs).
@@ -194,7 +188,7 @@ fn native_options(agent: bool, x11: bool) -> eframe::NativeOptions {
 /// Creates the app once eframe has its window and graphics device; sets `created` when it runs,
 /// and confirms the graphics mode once two frames have painted.
 fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<AtomicBool>) -> eframe::AppCreator<'static> {
-    let Launch { control_port, control_input_only, files, demo, startup_flag, recover, data_dir, graphics: _, x11: _, wayland: _ } = launch;
+    let Launch { control_port, control_input_only, files, demo, startup_flag, recover, data_dir, graphics: _, x11: _ } = launch;
     Box::new(move |cc| {
         created.store(true, Ordering::Relaxed);
         // A fallback graphics mode says so in the window, with a button back to the default.

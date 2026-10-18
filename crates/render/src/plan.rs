@@ -227,11 +227,60 @@ fn whole_frame_on_cpu(project: &Project, seq: &Sequence, t: Tick) -> bool {
     !seq.settings.color.is_plain() || !layered_at(project, seq, t)
 }
 
-/// Whether the frame of `seq` at `t` can be planned as layers: no adjustment layer and no
+/// The standard effects of an adjustment layer if the GPU effect stage can run all of them across
+/// the full sequence frame (unmasked, 100 % Normal opacity, full-frame Motion, and at least one
+/// standard effect).
+fn gpu_adjustment_chain<'a>(
+    project: &Project,
+    seq: &Sequence,
+    item: &'a TrackItem,
+    t: Tick,
+) -> Option<Vec<&'a filmcraft_project::EffectInstance>> {
+    if !crate::is_adjustment(project, item) || !item.has_standard_effects() || item.has_opacity_masks() {
+        return None;
+    }
+    let mt = item.effect_time_at(t);
+    let (op, bl) = crate::opacity_blend(item, mt);
+    if op < 1.0 - 1e-6 || bl != Blend::Normal {
+        return None;
+    }
+    if crate::adjustment_region(seq, item, project, mt, 1.0, seq.settings.width as usize, seq.settings.height as usize).is_some() {
+        return None;
+    }
+    let mut chain = Vec::new();
+    for e in item.effects.iter().filter(|e| e.def().is_some_and(|d| !d.intrinsic)) {
+        if !e.enabled {
+            continue;
+        }
+        let masked = e.masks.iter().any(|m| m.mode != filmcraft_project::MaskMode::None);
+        if masked || !crate::gpufx::GPU_EFFECTS.contains(&e.effect.as_str()) {
+            return None;
+        }
+        chain.push(e);
+    }
+    let cx = crate::effects::FxCtx {
+        t: mt,
+        px_scale: 1.0,
+        seconds: (t - item.start).seconds(),
+        timecode: "",
+        clip_name: &item.name,
+        project: Some(project),
+        env: None,
+        frame_rate: seq.settings.frame_rate.as_f64(),
+        working: seq.settings.color.working,
+    };
+    let (sw, sh) = (seq.settings.width.max(1) as usize, seq.settings.height.max(1) as usize);
+    for e in &chain {
+        FxOp::eval(e, &cx, sw, sh).filter(FxOp::gpu_ok)?;
+    }
+    Some(chain)
+}
+
+/// Whether the frame of `seq` at `t` can be planned as layers: no CPU-only adjustment layer and no
 /// transition the compositor cannot mix itself is showing (a transition into or out of an
 /// adjustment layer counts, also on the side of the cut where the other clip is).
 pub(crate) fn layered_at(project: &Project, seq: &Sequence, t: Tick) -> bool {
-    let adjustment = |it: &TrackItem| project.item(it.item).is_some_and(|p| matches!(p.kind, ItemKind::AdjustmentLayer { .. }));
+    let adjustment = |it: &TrackItem| crate::is_adjustment(project, it);
     for tr in &seq.video_tracks {
         if !tr.enabled {
             continue;
@@ -246,6 +295,7 @@ pub(crate) fn layered_at(project: &Project, seq: &Sequence, t: Tick) -> bool {
         }
         if let Some(it) = tr.item_at(t)
             && adjustment(it)
+            && (!it.enabled || gpu_adjustment_chain(project, seq, it, t).is_none())
         {
             return false;
         }
@@ -324,7 +374,9 @@ fn nest_is_plain(project: &Project, seq: &Sequence, nested: &Sequence, ft: Tick)
         && !nested.video_tracks.iter().any(|tr| tr.enabled && tr.transitions.iter().any(|t| t.range().contains(ft) && !simple_transition(&t.effect.effect)))
         && nested.video_tracks.iter().filter(|tr| tr.enabled).all(|tr| {
             tr.transitions.iter().any(|x| x.range().contains(ft))
-                || tr.item_at(ft).filter(|i| i.enabled).is_none_or(|i| crate::opacity_blend(i, i.effect_time_at(ft)).1 == Blend::Normal)
+                || tr.item_at(ft).filter(|i| i.enabled).is_none_or(|i| {
+                    !crate::is_adjustment(project, i) && crate::opacity_blend(i, i.effect_time_at(ft)).1 == Blend::Normal
+                })
         })
 }
 
@@ -350,6 +402,90 @@ fn push_item(
     let mt = item.effect_time_at(t);
     let (op, own) = crate::opacity_blend(item, mt);
     let bl = blend.unwrap_or(own);
+    if crate::is_adjustment(project, item) {
+        if !opts.effects {
+            return;
+        }
+        let (w, h) = output_size(seq, opts.scale);
+        if let Some(chain) = gpu_adjustment_chain(project, seq, item, t)
+            && extra_opacity >= 1.0 - 1e-6
+            && bl == Blend::Normal
+        {
+            if chain.is_empty() {
+                return;
+            }
+            if out.0.len() == 1
+                && let Some(PlanStep::Layers(layers)) = out.0.first_mut()
+                && layers.len() == 1
+            {
+                let l = &mut layers[0];
+                let (lw, lh) = (l.size().0.max(1) as usize, l.size().1.max(1) as usize);
+                let full_fit = Affine::scale(lw as f64 / w.max(1) as f64, lh as f64 / h.max(1) as f64).then_apply(&l.matrix);
+                let n = (l.frame.width as usize / w.max(1)).max(1);
+                let decimated_matches = l.fx.is_some() && (lw, lh) == (w, h)
+                    || l.fx.is_none() && ((l.frame.width as usize / n).max(1), (l.frame.height as usize / n).max(1)) == (w, h);
+                if l.opacity >= 1.0 - 1e-6
+                    && l.blend == Blend::Normal
+                    && l.frame.width > 1
+                    && l.frame.height > 1
+                    && near_identity(&full_fit)
+                    && decimated_matches
+                {
+                    let cx = crate::effects::FxCtx {
+                        t: mt,
+                        px_scale: opts.scale,
+                        seconds: (t - item.start).seconds(),
+                        timecode: "",
+                        clip_name: &item.name,
+                        project: Some(project),
+                        env: None,
+                        frame_rate: seq.settings.frame_rate.as_f64(),
+                        working: seq.settings.color.working,
+                    };
+                    let ops: Option<Vec<FxOp>> = chain.iter().map(|e| FxOp::eval(e, &cx, w, h).filter(FxOp::gpu_ok)).collect();
+                    if let Some(mut ops) = ops {
+                        if let Some(fx_arc) = &mut l.fx {
+                            let fx = Arc::make_mut(fx_arc);
+                            fx.ops.append(&mut ops);
+                        } else {
+                            l.fx = Some(Arc::new(LayerFx { size: (w as u32, h as u32), decimation: n as u32, ops }));
+                            l.matrix = Affine::IDENTITY;
+                        }
+                        return;
+                    }
+                }
+            }
+            let cx = crate::effects::FxCtx {
+                t: mt,
+                px_scale: opts.scale,
+                seconds: (t - item.start).seconds(),
+                timecode: "",
+                clip_name: &item.name,
+                project: Some(project),
+                env: None,
+                frame_rate: seq.settings.frame_rate.as_f64(),
+                working: seq.settings.color.working,
+            };
+            let ops: Option<Vec<FxOp>> = chain.iter().map(|e| FxOp::eval(e, &cx, w, h).filter(FxOp::gpu_ok)).collect();
+            if let Some(ops) = ops {
+                let below = execute_cpu(&std::mem::take(out).finish(w, h));
+                let mut layer = PlanLayer::new(cpu_frame(below), Affine::IDENTITY, 1.0, Blend::Normal);
+                layer.fx = Some(Arc::new(LayerFx { size: (w as u32, h as u32), decimation: 1, ops }));
+                out.push(layer);
+                return;
+            }
+        }
+        let below = execute_cpu(&std::mem::take(out).finish(w, h));
+        let tc = filmcraft_time::format_time(t, seq.settings.frame_rate, seq.settings.drop_frame, filmcraft_time::TimeDisplay::Timecode, 48_000);
+        let (adj, adj_bl) = crate::adjustment_layer(project, seq, item, t, opts, &tc, &below);
+        if adj_bl == Blend::Normal {
+            out.push(PlanLayer::new(cpu_frame(adj), Affine::IDENTITY, extra_opacity, bl));
+        } else {
+            out.push(PlanLayer::new(cpu_frame(below), Affine::IDENTITY, 1.0, Blend::Normal));
+            out.push(PlanLayer::new(cpu_frame(adj), Affine::IDENTITY, extra_opacity, adj_bl));
+        }
+        return;
+    }
     // A multi-camera clip that only shows its angle (no effects, untransformed, same frame size)
     // draws the angle's clip directly: no CPU pass over the nested sequence.
     if let Some(ItemKind::Sequence(nested)) = project.item(item.item).map(|p| &p.kind)

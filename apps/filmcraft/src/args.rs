@@ -21,8 +21,7 @@ Options:
   --graphics <mode>  start with this graphics mode and keep it: default,
                      dx12 (Windows), software (Windows, Linux);
                      `--graphics default` undoes an automatic fallback
-  --x11              run via X11 / XWayland on Linux (default when DISPLAY is present; enables drag-and-drop)
-  --wayland          run via native Wayland on Linux (disables drag-and-drop due to winit)
+  --x11              run via X11 / XWayland on Linux (enables file drag-and-drop)
   --version          print the version and exit
   -h, --help         print this help and exit
 ";
@@ -51,8 +50,6 @@ pub struct Launch {
     pub graphics: Option<crate::graphics::Mode>,
     /// `--x11`: run via X11 / XWayland backend on Linux for drag-and-drop compatibility.
     pub x11: bool,
-    /// `--wayland`: run via native Wayland backend on Linux.
-    pub wayland: bool,
 }
 
 /// Parse the arguments after the program name. `env_control_port` is the value of
@@ -77,7 +74,6 @@ pub fn parse(env_control_port: Option<String>, args: impl IntoIterator<Item = Os
         data_dir: None,
         graphics: None,
         x11: false,
-        wayland: false,
     };
     let (mut help, mut version) = (false, false);
     let mut args = args.into_iter();
@@ -87,7 +83,6 @@ pub fn parse(env_control_port: Option<String>, args: impl IntoIterator<Item = Os
             "-h" | "--help" => help = true,
             "--version" => version = true,
             "--x11" => l.x11 = true,
-            "--wayland" => l.wayland = true,
             "--control" => {
                 let port = args.next().ok_or("--control needs a port number")?;
                 let port = port.to_string_lossy();
@@ -246,7 +241,6 @@ mod tests {
                 data_dir: None,
                 graphics: None,
                 x11: false,
-                wayland: false,
             }
         );
         let l = launch(&["--control", "9876", "--empty", "--no-recover", "--data-dir", "/tmp/fc", "cut.fcproj", "a.mp4"]);

@@ -190,9 +190,9 @@ impl Pipeline {
         let renderer = if settings.gpu_rendering == GpuRendering::Off {
             None
         } else {
-            // Four renderers: as fast as one per worker (measured on 16 threads, where more only
-            // contend for memory bandwidth in the read-back), with a quarter of the GPU memory.
-            let count = rayon::current_num_threads().clamp(2, 4);
+            // Up to eight GPU renderers in the pool so larger batches stay in flight and saturate
+            // hardware encoding without idling between read-backs.
+            let count = rayon::current_num_threads().clamp(4, 8);
             let mut list = Vec::with_capacity(count);
             for _ in 0..count {
                 if let Some(r) = build_frame_renderer() {

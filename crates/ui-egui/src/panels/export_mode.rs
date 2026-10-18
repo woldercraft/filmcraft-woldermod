@@ -63,7 +63,9 @@ pub struct ExportUi {
 
 impl Default for ExportUi {
     fn default() -> Self {
-        let preset = filmcraft_engine::export::presets::find_builtin(DEFAULT_PRESET).map(|p| p.settings).unwrap_or_default();
+        let mut preset = filmcraft_engine::export::presets::find_builtin(DEFAULT_PRESET).map(|p| p.settings).unwrap_or_default();
+        preset.gpu_rendering = filmcraft_export::GpuRendering::Auto;
+        preset.hardware_encoding = filmcraft_export::HardwareEncoding::Auto;
         ExportUi {
             preset: DEFAULT_PRESET.into(),
             settings: preset,
@@ -116,7 +118,9 @@ fn settings_json(s: &ExportSettings) -> Value {
 /// Apply a preset by name (from the engine's library).
 pub fn apply_preset(app: &mut FilmcraftApp, name: &str) -> bool {
     match app.session.export_presets.find(name) {
-        Some(p) => {
+        Some(mut p) => {
+            p.settings.gpu_rendering = filmcraft_export::GpuRendering::Auto;
+            p.settings.hardware_encoding = filmcraft_export::HardwareEncoding::Auto;
             app.ui.export.settings = p.settings;
             app.ui.export.preset = p.name;
             true
@@ -445,6 +449,88 @@ pub(crate) const PARS: [(&str, Option<(u32, u32)>); 6] = [
     ("Anamorphic 2:1 (2.0)", Some((2, 1))),
 ];
 
+/// Top-level export container in DaVinci Resolve style.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExportContainer {
+    Mp4,
+    QuickTime,
+    Mxf,
+    ImageSequence,
+    AudioOnly,
+}
+
+impl ExportContainer {
+    pub const ALL: [ExportContainer; 5] = [
+        ExportContainer::Mp4,
+        ExportContainer::QuickTime,
+        ExportContainer::Mxf,
+        ExportContainer::ImageSequence,
+        ExportContainer::AudioOnly,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ExportContainer::Mp4 => "MP4 (.mp4)",
+            ExportContainer::QuickTime => "QuickTime (.mov)",
+            ExportContainer::Mxf => "MXF OP1a (.mxf)",
+            ExportContainer::ImageSequence => "Image Sequence",
+            ExportContainer::AudioOnly => "Audio Only",
+        }
+    }
+
+    pub fn from_settings(s: &ExportSettings) -> Self {
+        if s.format.is_audio_only() {
+            ExportContainer::AudioOnly
+        } else if s.is_image_sequence() {
+            ExportContainer::ImageSequence
+        } else if s.format.is_mxf() {
+            ExportContainer::Mxf
+        } else if s.format.is_h26x() {
+            if s.multiplexer == Multiplexer::Mov {
+                ExportContainer::QuickTime
+            } else {
+                ExportContainer::Mp4
+            }
+        } else {
+            ExportContainer::QuickTime
+        }
+    }
+
+    pub fn codecs(self) -> Vec<(Format, &'static str)> {
+        match self {
+            ExportContainer::Mp4 => vec![
+                (Format::H264, "H.264"),
+                (Format::Hevc, "H.265 (HEVC)"),
+                (Format::Av1, "AV1"),
+            ],
+            ExportContainer::QuickTime => vec![
+                (Format::ProRes, "Apple ProRes"),
+                (Format::H264, "H.264"),
+                (Format::DnxHr, "Avid DNxHR"),
+                (Format::Apv, "APV"),
+                (Format::Mjpeg, "Motion JPEG"),
+            ],
+            ExportContainer::Mxf => vec![
+                (Format::MxfOp1a, "MXF OP1a (Avid DNxHR / ProRes / H.264)"),
+            ],
+            ExportContainer::ImageSequence => vec![
+                (Format::PngSequence, "PNG Sequence"),
+                (Format::TiffSequence, "TIFF Sequence"),
+                (Format::JpegSequence, "JPEG Sequence"),
+                (Format::ExrSequence, "OpenEXR Sequence"),
+                (Format::DpxSequence, "DPX Sequence"),
+                (Format::BmpSequence, "BMP Sequence"),
+            ],
+            ExportContainer::AudioOnly => vec![
+                (Format::Wav, "WAV (PCM)"),
+                (Format::Aac, "AAC (.m4a)"),
+                (Format::Flac, "FLAC (Lossless)"),
+                (Format::Aiff, "AIFF"),
+            ],
+        }
+    }
+}
+
 fn settings_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let mut reg = Reg::default();
@@ -460,12 +546,38 @@ fn settings_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let seq_hdr = app.session.active_sequence().is_some_and(|q| q.settings.color.working.is_hdr());
     let all_presets = app.session.export_presets.all();
     let favs: Vec<String> = all_presets.iter().filter(|p| app.session.export_presets.is_favorite(&p.name)).map(|p| p.name.clone()).collect();
+    let gpu_name = app.gpu.as_ref().map(|g| g.render_state.adapter.get_info().name.clone());
     let mut pick_folder = false;
     let mut pick_overlay = false;
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(14.0, 10.0))).id_salt("export-settings"));
     let ex = &mut app.ui.export;
     egui::ScrollArea::vertical().id_salt("export-settings-scroll").auto_shrink([false, false]).show(&mut child, |ui| {
         ui.label(egui::RichText::new(tl!("Media File")).strong().size(14.0));
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            let quick_presets = [
+                ("Custom", CUSTOM),
+                ("YouTube 1080p", "YouTube 1080p Full HD"),
+                ("YouTube 4K", "YouTube 2160p 4K"),
+                ("H.264 Master", "Match Source - Adaptive High Bitrate"),
+                ("ProRes HQ", "Apple ProRes 422 HQ"),
+                ("Audio Only", "Waveform Audio 48 kHz 16-bit"),
+            ];
+            for (label, preset_name) in quick_presets {
+                let is_active = ex.preset == preset_name;
+                let btn = egui::Button::new(
+                    egui::RichText::new(label)
+                        .size(11.0)
+                        .color(if is_active { Color32::WHITE } else { t.text }),
+                )
+                .fill(if is_active { t.accent } else { t.field_bg })
+                .corner_radius(10.0)
+                .min_size(vec2(0.0, 22.0));
+                if ui.add(btn).clicked() {
+                    chosen_preset = Some(preset_name.to_string());
+                }
+            }
+        });
         ui.add_space(6.0);
         row(ui, &t, tl!("File Name"), |ui| {
             if let Some(v) = draft_text(ui, &mut reg, "export.fileName", &ex.file_name, tl!("Sequence name")) {
@@ -518,28 +630,79 @@ fn settings_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 open_manager = true;
             }
         });
+        let cur_container = ExportContainer::from_settings(&ex.settings);
+        let container_labels: Vec<(String, bool)> = ExportContainer::ALL.iter().map(|c| (c.label().to_string(), true)).collect();
         row(ui, &t, tl!("Format"), |ui| {
-            let labels: Vec<(String, bool)> = Format::ALL.iter().map(|f| (f.label().to_string(), filmcraft_engine::export::available(*f))).collect();
-            if let Some(i) = combo(ui, &mut reg, "export.format", ex.settings.format.label(), &labels, ui.available_width() - 4.0) {
-                let f = Format::ALL[i];
-                if f != ex.settings.format {
-                    // a format switch starts from that format's defaults (keeping size / rate / range)
+            if let Some(i) = combo(ui, &mut reg, "export.format", cur_container.label(), &container_labels, ui.available_width() - 4.0) {
+                let new_c = ExportContainer::ALL[i];
+                if new_c != cur_container {
                     let keep = ex.settings.clone();
+                    let (target_format, target_mux) = match new_c {
+                        ExportContainer::Mp4 => (Format::H264, Multiplexer::Mp4),
+                        ExportContainer::QuickTime => {
+                            if keep.format == Format::H264 {
+                                (Format::H264, Multiplexer::Mov)
+                            } else if matches!(keep.format, Format::ProRes | Format::DnxHr | Format::Apv | Format::Mjpeg) {
+                                (keep.format, Multiplexer::Mov)
+                            } else {
+                                (Format::ProRes, Multiplexer::Mov)
+                            }
+                        }
+                        ExportContainer::Mxf => (Format::MxfOp1a, Multiplexer::Mp4),
+                        ExportContainer::ImageSequence => (Format::PngSequence, Multiplexer::Mp4),
+                        ExportContainer::AudioOnly => (Format::Wav, Multiplexer::Mp4),
+                    };
                     ex.settings = ExportSettings {
-                        format: f,
+                        format: target_format,
+                        multiplexer: target_mux,
                         frame_size: keep.frame_size,
                         frame_rate: keep.frame_rate,
                         effects: keep.effects,
                         metadata: keep.metadata,
+                        gpu_rendering: GpuRendering::Auto,
+                        hardware_encoding: HardwareEncoding::Auto,
                         ..Default::default()
                     };
                 }
             }
         });
+        let cur_container = ExportContainer::from_settings(&ex.settings);
+        let codec_list = cur_container.codecs();
+        if codec_list.len() > 1 {
+            let cur_codec_label = codec_list.iter().find(|(f, _)| *f == ex.settings.format).map(|(_, l)| *l).unwrap_or(ex.settings.format.label());
+            let codec_labels: Vec<(String, bool)> = codec_list.iter().map(|(f, l)| (l.to_string(), filmcraft_engine::export::available(*f))).collect();
+            row(ui, &t, tl!("Codec"), |ui| {
+                if let Some(i) = combo(ui, &mut reg, "export.codec", cur_codec_label, &codec_labels, ui.available_width() - 4.0) {
+                    let (new_f, _) = codec_list[i];
+                    if new_f != ex.settings.format {
+                        let keep = ex.settings.clone();
+                        let mux = if cur_container == ExportContainer::QuickTime && new_f == Format::H264 {
+                            Multiplexer::Mov
+                        } else if cur_container == ExportContainer::Mp4 {
+                            Multiplexer::Mp4
+                        } else {
+                            keep.multiplexer
+                        };
+                        ex.settings = ExportSettings {
+                            format: new_f,
+                            multiplexer: mux,
+                            frame_size: keep.frame_size,
+                            frame_rate: keep.frame_rate,
+                            effects: keep.effects,
+                            metadata: keep.metadata,
+                            gpu_rendering: GpuRendering::Auto,
+                            hardware_encoding: HardwareEncoding::Auto,
+                            ..Default::default()
+                        };
+                    }
+                }
+            });
+        }
+        reg.add("export.section.multiplexer", ui.min_rect(), "Multiplexer");
         ui.add_space(8.0);
         let s = &mut ex.settings;
         if s.has_video() && section(ui, &mut reg, &mut ex.open_sections, "video", tl!("Video"), &t) {
-            video_section(ui, &mut reg, s, &t, seq_w, seq_h, seq_hdr);
+            video_section(ui, &mut reg, s, &t, seq_w, seq_h, seq_hdr, gpu_name.as_deref());
         }
         if (s.has_audio()
             || !s.has_video()
@@ -551,14 +714,6 @@ fn settings_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             && section(ui, &mut reg, &mut ex.open_sections, "audio", tl!("Audio"), &t)
         {
             audio_section(ui, &mut reg, s, &t, seq_sr);
-        }
-        if s.format.is_h26x() && section(ui, &mut reg, &mut ex.open_sections, "multiplexer", tl!("Multiplexer"), &t) {
-            row(ui, &t, tl!("Multiplexer"), |ui| {
-                let cur = if s.multiplexer == Multiplexer::Mp4 { "MP4" } else { "QuickTime" };
-                if let Some(i) = combo(ui, &mut reg, "export.multiplexer", cur, &opts(&["MP4", "QuickTime"]), 160.0) {
-                    s.multiplexer = if i == 0 { Multiplexer::Mp4 } else { Multiplexer::Mov };
-                }
-            });
         }
         if s.has_video() && section(ui, &mut reg, &mut ex.open_sections, "captions", tl!("Captions"), &t) {
             if !has_captions {
@@ -631,7 +786,7 @@ fn settings_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     reg.flush(app);
 }
 
-fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &Tokens, seq_w: u32, seq_h: u32, seq_hdr: bool) {
+fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &Tokens, seq_w: u32, seq_h: u32, seq_hdr: bool, gpu_name: Option<&str>) {
     // frame size
     let mut match_size = s.frame_size.is_none();
     row(ui, t, tl!("Frame Size"), |ui| {
@@ -648,6 +803,27 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
             (*w, *h) = (fw as u32, fh as u32);
         });
     }
+    row(ui, t, "", |ui| {
+        ui.horizontal(|ui| {
+            let cur_sz = s.frame_size;
+            let mut pick_sz = None;
+            if ui.selectable_label(cur_sz == Some((1920, 1080)), "1080p FHD").clicked() {
+                pick_sz = Some(Some((1920, 1080)));
+            }
+            if ui.selectable_label(cur_sz == Some((3840, 2160)), "4K UHD").clicked() {
+                pick_sz = Some(Some((3840, 2160)));
+            }
+            if ui.selectable_label(cur_sz == Some((1280, 720)), "720p HD").clicked() {
+                pick_sz = Some(Some((1280, 720)));
+            }
+            if ui.selectable_label(cur_sz.is_none(), tl!("Match Source")).clicked() {
+                pick_sz = Some(None);
+            }
+            if let Some(sz) = pick_sz {
+                s.frame_size = sz;
+            }
+        });
+    });
     // frame rate
     let mut match_rate = s.frame_rate.is_none();
     row(ui, t, tl!("Frame Rate"), |ui| {
@@ -689,6 +865,8 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
             check(ui, reg, "export.video.alpha", &mut s.alpha, tl!("Include Alpha Channel"));
         });
     }
+    let gpu_short = gpu_name.map(|n| n.split(" (").next().unwrap_or(n).trim()).filter(|n| !n.is_empty());
+    let hw_enc_available = filmcraft_engine::export::available(Format::Hevc);
     match s.video_format() {
         f @ (Format::H264 | Format::Hevc | Format::Av1) => {
             // H.265 and AV1: hardware encoders only (one profile, level chosen by the encoder)
@@ -705,7 +883,10 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
                         (false, _) => tl!("Main (8-bit)"),
                     };
                     row(ui, t, tl!("Profile"), |ui| ui.label(label));
-                    row(ui, t, tl!("Encoder"), |ui| ui.label(tl!("Hardware (H.265 has no software encoder)")));
+                    let hw_label = gpu_short
+                        .map(|g| format!("{g} (Hardware GPU)"))
+                        .unwrap_or_else(|| tl!("Hardware (H.265 has no software encoder)").to_string());
+                    row(ui, t, tl!("Encoder"), |ui| ui.label(hw_label));
                 }
             } else {
                 row(ui, t, tl!("Profile"), |ui| {
@@ -782,11 +963,33 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
             // every machine without one keeps the built-in encoder.
             // H.265 and AV1 have only hardware encoders: choosing the format is the opt-in.
             if !hevc {
-                row(ui, t, "Hardware Encoding", |ui| {
-                    let mut on = s.hardware_encoding == HardwareEncoding::Auto;
-                    if check(ui, reg, "export.video.hardwareEncoding", &mut on, "Use the hardware encoder when available") {
-                        s.hardware_encoding = if on { HardwareEncoding::Auto } else { HardwareEncoding::Off };
+                row(ui, t, tl!("Encoder"), |ui| {
+                    let hw_opt = gpu_short
+                        .map(|g| format!("{g} (Hardware GPU)"))
+                        .unwrap_or_else(|| tl!("Auto (Hardware when available)").to_string());
+                    let encoder_opts = [
+                        (hw_opt, true),
+                        (tl!("Native / CPU (Software x264)").to_string(), true),
+                    ];
+                    let cur = if s.hardware_encoding == HardwareEncoding::Auto {
+                        &encoder_opts[0].0
+                    } else {
+                        &encoder_opts[1].0
+                    };
+                    if let Some(i) = combo(ui, reg, "export.video.encoder", cur, &encoder_opts, 230.0) {
+                        s.hardware_encoding = if i == 0 { HardwareEncoding::Auto } else { HardwareEncoding::Off };
                     }
+                    reg.add("export.video.hardwareEncoding", ui.min_rect(), "Hardware encoding");
+                });
+                row(ui, t, "", |ui| {
+                    let g_label = gpu_short.unwrap_or("GPU");
+                    let (status_text, is_hw) = if s.hardware_encoding == HardwareEncoding::Auto && hw_enc_available {
+                        (format!("🟢 Exportación 100% con GPU: {g_label} (Render Vulkan + Codificador Hardware)"), true)
+                    } else {
+                        (format!("ℹ Codificador en CPU (Software x264) · Efectos en {g_label}"), false)
+                    };
+                    let color = if is_hw { t.accent } else { t.text_dim };
+                    ui.label(egui::RichText::new(status_text).size(11.0).color(color));
                 });
             }
         }
@@ -847,11 +1050,20 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
     }
     // Composite the picture on the GPU (filmcraft-gpu) instead of the CPU reference renderer;
     // Auto falls back to the CPU wherever the GPU cannot render the frame.
-    row(ui, t, tl!("GPU Rendering"), |ui| {
+    row(ui, t, tl!("GPU Acceleration"), |ui| {
         let mut on = s.gpu_rendering == GpuRendering::Auto;
         if check(ui, reg, "export.gpuRendering", &mut on, tl!("Composite on the GPU when available")) {
             s.gpu_rendering = if on { GpuRendering::Auto } else { GpuRendering::Off };
         }
+    });
+    row(ui, t, "", |ui| {
+        let g_label = gpu_short.unwrap_or("GPU");
+        let (msg, col) = if s.gpu_rendering == GpuRendering::Auto {
+            (format!("⚡ Renderizado activo en {g_label} (Vulkan: efectos, capas y color)"), t.accent)
+        } else {
+            ("Renderizado en CPU (desactivado)".to_string(), t.text_dim)
+        };
+        ui.label(egui::RichText::new(msg).size(11.0).color(col));
     });
     row(ui, t, "", |ui| check(ui, reg, "export.video.maxDepth", &mut s.render_at_max_depth, tl!("Render at Maximum Depth")));
     row(ui, t, "", |ui| check(ui, reg, "export.video.maxQuality", &mut s.max_render_quality, tl!("Use Maximum Render Quality")));

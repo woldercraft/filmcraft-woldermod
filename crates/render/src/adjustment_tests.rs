@@ -103,6 +103,30 @@ fn applies_to_everything_below_but_not_above() {
 }
 
 #[test]
+fn adjustment_layer_gaussian_blur_blurs_video_below() {
+    let mut s = scene(2);
+    let ocean = media(&mut s.p, &mut s.map, GeneratorSource::demo(DemoScene::OceanSunset));
+    place(&mut s.p, s.seq, 0, ocean);
+    let sharp = render(&s);
+    let adj = adjustment(&mut s.p, s.seq, 1);
+    fx(&mut s, adj, "gaussian_blur");
+    let blurred_default = render(&s);
+    assert_eq!(sharp.get(160, 90), blurred_default.get(160, 90));
+
+    clip(&mut s, adj).effect_mut("gaussian_blur").unwrap().params.get_mut("blurriness").unwrap().value = ParamValue::Float(1830.2);
+    let blurred = render(&s);
+    eprintln!("sharp: {:?}", sharp.get(160, 90));
+    eprintln!("blurred: {:?}", blurred.get(160, 90));
+    assert_ne!(sharp.get(160, 90), blurred.get(160, 90));
+    assert!(!crate::plan::is_cpu_frame(&s.p, s.seq, R.tick_of(12)), "adjustment layer with GPU effects should render on GPU");
+    let plan = crate::plan::plan_frame(&s.p, s.seq, R.tick_of(12), RenderOptions::default(), &s.map);
+    assert!(matches!(&plan, crate::plan::FramePlan::Layers { layers, .. } if layers.len() == 1 && layers[0].fx.is_some()));
+    let planned_img = crate::plan::execute_cpu(&plan);
+    let b = blurred.get(160, 90);
+    assert!(near(planned_img.get(160, 90), [b[0], b[1], b[2]], 1e-6));
+}
+
+#[test]
 fn opacity_and_blend_mode_mix_over_the_original() {
     let mut s = scene(2);
     let red = matte(&mut s.p, &mut s.map, [1.0, 0.0, 0.0, 1.0]);
