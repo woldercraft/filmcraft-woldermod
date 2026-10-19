@@ -3612,3 +3612,12 @@
 	Selecting {count} clips in Traditional Mode can freeze the application. Switch to Fast Selection Mode for high-performance editing.	在传统模式下选择 {count} 个剪辑可能会导致应用程序卡死。请切换到快速选择模式以进行高性能编辑。
 	⚡ Switch to Fast Selection Mode	⚡ 切换到快速选择模式
 	Keep Traditional Mode	保持传统模式
+	Apply Changes & Exit (Enter)	应用更改并退出 (Enter)
+	Cancel (Esc)	取消 (Esc)
+	Do not show this message again (remember choice)	不再显示此消息（记住选择）
+	Pending Move: {count} clips ({offset})	待定移动: {count} 个剪辑 ({offset})
+	Macro Timeline	宏时间线
+	Show Macro Timeline (Dual View)	显示宏时间线（双视图）
+	Toggle Macro Timeline (Dual View)	切换宏时间线（双视图）
+	⚡ Fast Mode: ON	⚡ 快速模式：开启
+	Fast Mode: OFF	快速模式：关闭

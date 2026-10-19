@@ -214,6 +214,9 @@ pub struct TimelineView {
     /// Do not show the prompt dialog suggesting to switch to Fast Selection Mode.
     #[serde(default)]
     pub fast_mode_prompt_never_show: bool,
+    /// Dual Timeline / Macro Timeline overview strip integrated into the timeline.
+    #[serde(default)]
+    pub show_macro_timeline: bool,
 }
 
 impl TimelineView {
@@ -246,6 +249,7 @@ impl Default for TimelineView {
             track_lanes: Default::default(),
             fast_selection_mode: false,
             fast_mode_prompt_never_show: false,
+            show_macro_timeline: false,
         }
     }
 }

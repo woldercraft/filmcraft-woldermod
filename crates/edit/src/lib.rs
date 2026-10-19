@@ -93,7 +93,10 @@ pub enum TrimMode {
 /// `links` maps old link groups to the new group for right-hand pieces (so linked partners split
 /// in the same operation stay linked to each other).
 pub fn split_track_at(track: &mut Track, t: Tick, ctx: &mut EditCtx, links: &mut HashMap<u64, u64>) -> Option<ClipId> {
-    let idx = track.items.iter().position(|i| i.start < t && t < i.end())?;
+    let idx = track.items.partition_point(|i| i.start <= t).checked_sub(1)?;
+    if !(track.items[idx].start < t && t < track.items[idx].end()) {
+        return None;
+    }
     let left = &mut track.items[idx];
     let mut right = left.clone();
     let cut = t - left.start;
@@ -273,11 +276,44 @@ pub fn overwrite(seq: &mut Sequence, placements: Vec<(TrackId, TrackItem)>, ctx:
         ids.push(item.id);
         by_track.entry(tid).or_default().push(item);
     }
-    for (tid, items) in by_track {
+    for (tid, mut items) in by_track {
         let t = track_mut(seq, tid)?;
         if t.items.is_empty() {
             t.items = items;
             t.items.sort_unstable_by_key(|i| i.start);
+        } else if items.len() > 16 {
+            items.sort_unstable_by_key(|i| i.start);
+            for item in &items {
+                if item.duration.0 <= 0 {
+                    continue;
+                }
+                split_track_at(t, item.start, ctx, &mut links);
+                split_track_at(t, item.end(), ctx, &mut links);
+            }
+            let mut merged_ranges: Vec<TimeRange> = Vec::with_capacity(items.len());
+            for item in &items {
+                let r = item.range();
+                if let Some(last) = merged_ranges.last_mut()
+                    && r.start <= last.end()
+                {
+                    *last = TimeRange::from_bounds(last.start, last.end().max(r.end()));
+                    continue;
+                }
+                merged_ranges.push(r);
+            }
+            t.items.retain(|i| {
+                let idx = merged_ranges.partition_point(|r| r.end() <= i.start);
+                if idx < merged_ranges.len() {
+                    let r = &merged_ranges[idx];
+                    if i.start >= r.start && i.end() <= r.end() {
+                        return false;
+                    }
+                }
+                true
+            });
+            t.items.extend(items);
+            t.items.sort_unstable_by_key(|i| i.start);
+            remove_orphan_transitions(t);
         } else {
             for item in items {
                 clear_track_range(t, item.range(), ctx, &mut links);

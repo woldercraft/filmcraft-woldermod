@@ -3636,3 +3636,12 @@
 	Selecting {count} clips in Traditional Mode can freeze the application. Switch to Fast Selection Mode for high-performance editing.	従来モードで {count} 個のクリップを選択するとアプリがフリーズする可能性があります。高パフォーマンス編集のために高速選択モードに切り替えてください。
 	⚡ Switch to Fast Selection Mode	⚡ 高速選択モードに切り替え
 	Keep Traditional Mode	従来モードを維持
+	Apply Changes & Exit (Enter)	変更を適用して終了 (Enter)
+	Cancel (Esc)	キャンセル (Esc)
+	Do not show this message again (remember choice)	今後このメッセージを表示しない (選択を記憶)
+	Pending Move: {count} clips ({offset})	保留中の移動: {count} クリップ ({offset})
+	Macro Timeline	マクロタイムライン
+	Show Macro Timeline (Dual View)	マクロタイムラインを表示（デュアルビュー）
+	Toggle Macro Timeline (Dual View)	マクロタイムラインの切り替え（デュアルビュー）
+	⚡ Fast Mode: ON	⚡ 高速モード: オン
+	Fast Mode: OFF	高速モード: オフ

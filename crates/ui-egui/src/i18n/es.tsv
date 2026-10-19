@@ -37,6 +37,7 @@
 	Appearance	Apariencia
 	Appearance…	Apariencia…
 	Apply Audio Transition	Aplicar transición de audio
+	Apply Changes & Exit (Enter)	Aplicar cambios y salir (Enter)
 	Apply Default Transitions to Selection	Aplicar transiciones predeterminadas a la selección
 	Apply Video Transition	Aplicar transición de video
 	Arrange	Organizar
@@ -3641,3 +3642,8 @@
 	Apply Changes (Enter)	Aplicar cambios (Enter)
 	Cancel (Esc)	Cancelar (Esc)
 	Pending Move: {count} clips ({offset})	Movimiento pendiente: {count} clips ({offset})
+	Macro Timeline	Línea de tiempo macro
+	Show Macro Timeline (Dual View)	Mostrar línea de tiempo macro (vista dual)
+	Toggle Macro Timeline (Dual View)	Alternar línea de tiempo macro (vista dual)
+	⚡ Fast Mode: ON	⚡ Modo rápido: ACTIVADO
+	Fast Mode: OFF	Modo rápido: DESACTIVADO

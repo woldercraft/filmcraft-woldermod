@@ -363,6 +363,23 @@ fn move_clips(s: &mut Session, p: &Value) -> Result<Value> {
         let offset = Tick(offset_val);
         let track_delta = p.get("trackDelta").and_then(Value::as_i64).unwrap_or(0) as i32;
         let is_all = bool_p(p, "all").unwrap_or(false);
+        let copy = bool_p(p, "copy").unwrap_or(false);
+        if is_all && track_delta == 0 && !copy {
+            s.edit_sequence("Move", |q, _, _| {
+                for tr in q.all_tracks_mut() {
+                    if !tr.locked {
+                        for it in &mut tr.items {
+                            it.start = (it.start + offset).max(Tick::ZERO);
+                        }
+                        for trn in &mut tr.transitions {
+                            trn.start = (trn.start + offset).max(Tick::ZERO);
+                        }
+                    }
+                }
+                Ok(())
+            })?;
+            return Ok(json!({}));
+        }
         let q = s.active_sequence().ok_or(EngineError::NoSequence)?;
         let clips_to_move: Vec<ClipId> = if is_all {
             q.all_tracks().filter(|t| !t.locked).flat_map(|t| t.items.iter().map(|i| i.id)).collect()
