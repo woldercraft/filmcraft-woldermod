@@ -3632,3 +3632,7 @@
 	Codec	コーデック
 	GPU Acceleration	GPUアクセラレーション
 	Native / CPU (Software x264)	ネイティブ / CPU (ソフトウェア x264)
+	Heavy Selection Detected	高い選択負荷を検出
+	Selecting {count} clips in Traditional Mode can freeze the application. Switch to Fast Selection Mode for high-performance editing.	従来モードで {count} 個のクリップを選択するとアプリがフリーズする可能性があります。高パフォーマンス編集のために高速選択モードに切り替えてください。
+	⚡ Switch to Fast Selection Mode	⚡ 高速選択モードに切り替え
+	Keep Traditional Mode	従来モードを維持

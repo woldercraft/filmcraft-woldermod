@@ -3608,3 +3608,7 @@
 	Codec	编解码器
 	GPU Acceleration	GPU 加速
 	Native / CPU (Software x264)	原生 / CPU（软件 x264）
+	Heavy Selection Detected	检测到高负载选择
+	Selecting {count} clips in Traditional Mode can freeze the application. Switch to Fast Selection Mode for high-performance editing.	在传统模式下选择 {count} 个剪辑可能会导致应用程序卡死。请切换到快速选择模式以进行高性能编辑。
+	⚡ Switch to Fast Selection Mode	⚡ 切换到快速选择模式
+	Keep Traditional Mode	保持传统模式

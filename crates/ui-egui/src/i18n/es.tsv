@@ -3633,3 +3633,7 @@
 	Codec	Códec
 	GPU Acceleration	Aceleración por GPU
 	Native / CPU (Software x264)	Nativo / CPU (x264 por software)
+	Heavy Selection Detected	Alta carga de selección detectada
+	Selecting {count} clips in Traditional Mode can freeze the application. Switch to Fast Selection Mode for high-performance editing.	Seleccionar {count} clips en modo tradicional puede congelar la aplicación. Cambia al modo de selección rápida para editar con alto rendimiento.
+	⚡ Switch to Fast Selection Mode	⚡ Cambiar a modo de selección rápida
+	Keep Traditional Mode	Mantener modo tradicional

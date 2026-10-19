@@ -33,10 +33,10 @@ const MASTER_H: f32 = 34.0;
 /// The selected gap between two clips (#648, #668).
 const GAP_FILL: Color32 = Color32::from_gray(224);
 const SNAP_PX: f32 = 9.0;
-/// Selection count where the Timeline warns that Fast Selection Mode is about to activate.
-pub const FAST_SELECTION_WARN_THRESHOLD: usize = 150;
+/// Selection count where the Timeline warns and prompts for Fast Selection Mode.
+pub const FAST_SELECTION_WARN_THRESHOLD: usize = 35;
 /// Selection count where Fast Selection Mode (High Performance) automatically activates.
-pub const FAST_SELECTION_LIMIT: usize = 250;
+pub const FAST_SELECTION_LIMIT: usize = 70;
 
 /// Waveform peaks are kept per audio stream: (item, index into the media's `audio_streams`).
 pub type PeakKey = (ItemId, usize);
@@ -81,6 +81,10 @@ pub struct TlState {
     pub fast_mode_warned: bool,
     /// Whether the auto-activated Fast Selection Mode toast/status has been shown for the current selection.
     pub fast_mode_auto_notified: bool,
+    /// When selecting many clips in traditional mode, prompts the user to switch to Fast Selection Mode.
+    pub fast_mode_prompt: Option<usize>,
+    /// Whether the user dismissed the prompt for the current selection gesture.
+    pub fast_mode_prompt_dismissed: bool,
 }
 
 impl TlState {
@@ -495,9 +499,21 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let sel_count = app.session.state.selection.len();
     if sel_count < FAST_SELECTION_WARN_THRESHOLD {
         app.tl.fast_mode_warned = false;
+        app.tl.fast_mode_prompt_dismissed = false;
     }
     if sel_count < FAST_SELECTION_LIMIT {
         app.tl.fast_mode_auto_notified = false;
+    }
+    // If selecting in traditional mode and reaching the heavy threshold, halt and prompt
+    if !app.ui.timeline.fast_selection_mode
+        && sel_count >= FAST_SELECTION_WARN_THRESHOLD
+        && !app.tl.fast_mode_prompt_dismissed
+        && app.tl.fast_mode_prompt.is_none()
+    {
+        if app.tl.drag.is_some() {
+            app.tl.drag = None;
+        }
+        app.tl.fast_mode_prompt = Some(sel_count);
     }
     if sel_count >= FAST_SELECTION_LIMIT && !app.tl.fast_mode_auto_notified {
         app.tl.fast_mode_auto_notified = true;
@@ -521,7 +537,11 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     let dragging_many = matches!(&app.tl.drag, Some(Drag::Move { clips, .. }) if clips.len() >= FAST_SELECTION_WARN_THRESHOLD)
         || (matches!(&app.tl.drag, Some(Drag::Marquee { .. })) && sel_count >= FAST_SELECTION_WARN_THRESHOLD);
-    let fast_mode = app.ui.timeline.fast_selection_mode || sel_count >= FAST_SELECTION_LIMIT || dragging_many;
+    let fast_mode = app.ui.timeline.fast_selection_mode
+        || sel_count >= FAST_SELECTION_LIMIT
+        || dragging_many
+        || app.tl.fast_mode_prompt.is_some()
+        || sel_count >= FAST_SELECTION_WARN_THRESHOLD;
 
     let selection: HashSet<ClipId> = app.session.state.selection.iter().copied().collect();
     let mut previews: HashMap<ClipId, (Tick, Tick, Option<TrackId>)> = HashMap::new(); // live drag preview: (start, dur, track)
@@ -597,7 +617,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             let x1 = layout.x_of(start + dur);
             let body = Rect::from_min_max(pos2(x0, r.rect.min.y + 1.0), pos2(x1.max(x0 + 1.0), r.rect.max.y - 1.0));
             draw_clip(app, &ctx, &p, body, it, r.kind, selection.contains(&it.id), &t, rate, fast_mode);
-            if volume_line {
+            if volume_line && !fast_mode {
                 super::timeline_volume::paint(&p, body, it);
             }
             if !(fast_mode && dragging_many) {
@@ -621,7 +641,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             for &(_, start, dur, it) in moved_list {
                 let body = Rect::from_min_max(pos2(layout.x_of(start), r.rect.min.y + 1.0), pos2(layout.x_of(start + dur), r.rect.max.y - 1.0));
                 draw_clip(app, &ctx, &p, body, it, r.kind, true, &t, rate, fast_mode);
-                if volume_line {
+                if volume_line && !fast_mode {
                     super::timeline_volume::paint(&p, body, it);
                 }
             }
@@ -775,6 +795,9 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // ---- fast selection / high-performance mode banner
     if fast_mode || sel_count >= FAST_SELECTION_WARN_THRESHOLD {
         draw_fast_selection_banner(app, ui, &painter, tracks_area, sel_count, fast_mode, &t);
+    }
+    if let Some(count) = app.tl.fast_mode_prompt {
+        show_fast_mode_prompt_dialog(app, &ctx, count);
     }
 
     // ---- scroll bars
@@ -1123,6 +1146,65 @@ fn draw_fast_selection_banner(
     let dot_center = pos2(banner_rect.min.x + 10.0, banner_rect.center().y);
     painter.circle_filled(dot_center, 3.5, icon_color);
     painter.galley(pos2(banner_rect.min.x + 18.0, banner_rect.min.y + 4.5), galley, t.text);
+}
+
+fn show_fast_mode_prompt_dialog(app: &mut FilmcraftApp, ctx: &egui::Context, count: usize) {
+    let mut close = false;
+    let mut enable_fast = false;
+    let mut keep_traditional = false;
+    egui::Window::new(tl!("Heavy Selection Detected"))
+        .id(egui::Id::new("fast-selection-prompt"))
+        .collapsible(false)
+        .resizable(false)
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(crate::widgets::dialog_center(ctx))
+        .default_width(380.0)
+        .show(ctx, |ui| {
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("⚡").size(24.0).color(Color32::from_rgb(245, 195, 55)));
+                ui.add_space(8.0);
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new(tlf!(
+                            "Selecting {count} clips in Traditional Mode can freeze the application. Switch to Fast Selection Mode for high-performance editing.",
+                            count = count
+                        ))
+                        .size(13.0),
+                    );
+                });
+            });
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                let btn_fast = egui::Button::new(
+                    egui::RichText::new(tl!("⚡ Switch to Fast Selection Mode")).color(Color32::BLACK).strong(),
+                )
+                .fill(Color32::from_rgb(245, 195, 55));
+                if ui.add(btn_fast).clicked() {
+                    enable_fast = true;
+                    close = true;
+                }
+                ui.add_space(8.0);
+                if ui.button(tl!("Keep Traditional Mode")).clicked() {
+                    keep_traditional = true;
+                    close = true;
+                }
+            });
+            ui.add_space(4.0);
+        });
+
+    if enable_fast {
+        app.ui.timeline.fast_selection_mode = true;
+        app.tl.fast_mode_prompt = None;
+        let msg = tlf!("Fast Selection Mode activated ({count} clips selected) — high-performance rendering enabled", count = count);
+        app.ui.status = msg.clone();
+        app.toast = Some((msg, ctx.input(|i| i.time)));
+    } else if keep_traditional {
+        app.tl.fast_mode_prompt = None;
+        app.tl.fast_mode_prompt_dismissed = true;
+    } else if close {
+        app.tl.fast_mode_prompt = None;
+    }
 }
 
 fn draw_waveform(app: &mut FilmcraftApp, p: &egui::Painter, body: Rect, it: &TrackItem, col: Color32) {
@@ -2863,8 +2945,17 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
                         sel.push(c);
                     }
                 }
+                let count = sel.len();
                 app.session.state.selection = sel;
-                Some(Drag::Marquee { start, before, add, individual })
+                if !app.ui.timeline.fast_selection_mode
+                    && count >= FAST_SELECTION_WARN_THRESHOLD
+                    && !app.tl.fast_mode_prompt_dismissed
+                {
+                    app.tl.fast_mode_prompt = Some(count);
+                    None
+                } else {
+                    Some(Drag::Marquee { start, before, add, individual })
+                }
             }
             other => Some(other),
         };
