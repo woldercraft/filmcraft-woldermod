@@ -3598,3 +3598,13 @@
 	Entire sequence	整个序列
 	{count} silences detected ({sec}s)	检测到 {count} 处静音 ({sec}秒)
 	Detecting silences…	正在检测静音…
+	Fast Selection Mode (High Performance)	快速选择模式（高性能）
+	Fast Selection Mode active ({count} clips)	快速选择模式已激活（{count} 个剪辑）
+	Fast Selection Mode active	快速选择模式已激活
+	Approaching limit ({count}/{limit} clips) — click for Fast Selection Mode	接近选择上限（{count}/{limit} 个剪辑）— 点击开启快速选择模式
+	Fast Selection Mode activated ({count} clips selected) — high-performance rendering enabled	已激活快速选择模式（已选 {count} 个剪辑）— 已开启高性能渲染
+	Approaching selection limit ({count}/{limit} clips) — Fast Selection Mode will activate at {limit} clips	接近选择上限（{count}/{limit} 个剪辑）— 达到 {limit} 个剪辑时将自动激活快速选择模式
+	Auto (Hardware when available)	自动（可用时使用硬件）
+	Codec	编解码器
+	GPU Acceleration	GPU 加速
+	Native / CPU (Software x264)	原生 / CPU（软件 x264）

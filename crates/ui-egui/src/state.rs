@@ -208,6 +208,9 @@ pub struct TimelineView {
     /// (`volume`, `pan`, `mute`, `send.<i>.level`, `fx.<slot>.<param>`).
     #[serde(default)]
     pub track_lanes: std::collections::BTreeMap<u64, String>,
+    /// Lightweight high-performance mode for heavy multi-clip selections and drags.
+    #[serde(default)]
+    pub fast_selection_mode: bool,
 }
 
 impl TimelineView {
@@ -238,6 +241,7 @@ impl Default for TimelineView {
             seen_playhead: None,
             fit_empty: None,
             track_lanes: Default::default(),
+            fast_selection_mode: false,
         }
     }
 }

@@ -384,21 +384,56 @@ fn has_audio_items(s: &Session) -> std::result::Result<(), String> {
 }
 fn selected_audio_clips(s: &Session) -> Vec<ClipId> {
     let Some(q) = s.active_sequence() else { return Vec::new() };
+    if s.state.selection.len() > 16 {
+        let audio_ids: std::collections::HashSet<ClipId> =
+            q.audio_tracks.iter().flat_map(|t| t.items.iter().map(|i| i.id)).collect();
+        return s.state.selection.iter().copied().filter(|c| audio_ids.contains(c)).collect();
+    }
     s.state.selection.iter().copied().filter(|c| q.audio_tracks.iter().any(|t| t.item(*c).is_some())).collect()
 }
 fn has_audio_target(s: &Session) -> std::result::Result<(), String> {
-    if audio_items(s).is_empty() && selected_audio_clips(s).is_empty() { Err("select a clip with audio".into()) } else { Ok(()) }
+    if !audio_items(s).is_empty() {
+        return Ok(());
+    }
+    if let Some(q) = s.active_sequence()
+        && !s.state.selection.is_empty()
+    {
+        let has_any = if s.state.selection.len() > 16 {
+            let sel: std::collections::HashSet<ClipId> = s.state.selection.iter().copied().collect();
+            q.audio_tracks.iter().any(|t| t.items.iter().any(|i| sel.contains(&i.id)))
+        } else {
+            s.state.selection.iter().any(|c| q.audio_tracks.iter().any(|t| t.item(*c).is_some()))
+        };
+        if has_any {
+            return Ok(());
+        }
+    }
+    Err("select a clip with audio".into())
 }
 fn extract_items(s: &Session) -> Vec<ItemId> {
     let mut out: Vec<ItemId> = s.state.project_selection.clone();
     if out.is_empty()
         && let Some(q) = s.active_sequence()
+        && !s.state.selection.is_empty()
     {
-        for c in &s.state.selection {
-            if let Some((_, i)) = q.find_item(*c)
-                && !out.contains(&i.item)
-            {
-                out.push(i.item);
+        if s.state.selection.len() > 16 {
+            let item_by_clip: std::collections::HashMap<ClipId, ItemId> =
+                q.all_tracks().flat_map(|t| t.items.iter().map(|i| (i.id, i.item))).collect();
+            let mut seen = std::collections::HashSet::new();
+            for c in &s.state.selection {
+                if let Some(&item) = item_by_clip.get(c)
+                    && seen.insert(item)
+                {
+                    out.push(item);
+                }
+            }
+        } else {
+            for c in &s.state.selection {
+                if let Some((_, i)) = q.find_item(*c)
+                    && !out.contains(&i.item)
+                {
+                    out.push(i.item);
+                }
             }
         }
     }
@@ -406,7 +441,24 @@ fn extract_items(s: &Session) -> Vec<ItemId> {
     out
 }
 fn has_extractable(s: &Session) -> std::result::Result<(), String> {
-    if extract_items(s).is_empty() { Err("select a clip with audio".into()) } else { Ok(()) }
+    if s.state.project_selection.iter().any(|i| media_root(&s.project, *i).is_some_and(|(_, m, _)| m.info.has_audio())) {
+        return Ok(());
+    }
+    if s.state.project_selection.is_empty()
+        && let Some(q) = s.active_sequence()
+        && !s.state.selection.is_empty()
+    {
+        let has_any = if s.state.selection.len() > 16 {
+            let sel: std::collections::HashSet<ClipId> = s.state.selection.iter().copied().collect();
+            q.all_tracks().flat_map(|t| t.items.iter()).any(|i| sel.contains(&i.id) && media_root(&s.project, i.item).is_some_and(|(_, m, _)| m.info.has_audio()))
+        } else {
+            s.state.selection.iter().any(|c| q.find_item(*c).is_some_and(|(_, i)| media_root(&s.project, i.item).is_some_and(|(_, m, _)| m.info.has_audio())))
+        };
+        if has_any {
+            return Ok(());
+        }
+    }
+    Err("select a clip with audio".into())
 }
 fn can_replace_from_source(s: &Session) -> std::result::Result<(), String> {
     has_selection(s)?;

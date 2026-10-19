@@ -1030,7 +1030,11 @@ impl Session {
         }
         source_monitor::track_history(self);
         if let Some(seq) = self.state.active_sequence.and_then(|s| p.sequence(s)) {
-            self.state.selection.retain(|c| seq.find_item(*c).is_some());
+            if !self.state.selection.is_empty() {
+                let valid: std::collections::HashSet<ClipId> =
+                    seq.all_tracks().flat_map(|t| t.items.iter().map(|i| i.id)).collect();
+                self.state.selection.retain(|c| valid.contains(c));
+            }
             self.state.caption_selection.retain(|c| seq.find_caption(*c).is_some());
         } else {
             self.state.selection.clear();

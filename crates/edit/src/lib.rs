@@ -24,7 +24,7 @@ pub mod through;
 pub mod transcript;
 pub mod transitions;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use filmcraft_project::{ClipId, ItemId, Sequence, Track, TrackId, TrackItem, Transition, TransitionId};
 use filmcraft_time::{Tick, TimeRange};
@@ -178,6 +178,9 @@ pub fn track_range_empty(track: &Track, range: TimeRange) -> bool {
 
 /// Drop transitions whose clips no longer exist or are no longer adjacent to them.
 pub fn remove_orphan_transitions(track: &mut Track) {
+    if track.transitions.is_empty() {
+        return;
+    }
     let ids: HashMap<ClipId, (Tick, Tick)> = track.items.iter().map(|i| (i.id, (i.start, i.end()))).collect();
     track.transitions.retain(|tr| {
         let from_ok = tr.from.is_none_or(|f| ids.contains_key(&f));
@@ -322,7 +325,9 @@ pub fn razor(seq: &mut Sequence, tracks: &[TrackId], t: Tick, ctx: &mut EditCtx)
 
 /// Razor only the given items (and their linked partners if listed) at `t`.
 pub fn razor_items(seq: &mut Sequence, items: &[ClipId], t: Tick, ctx: &mut EditCtx) -> Vec<ClipId> {
-    let tracks: Vec<TrackId> = items.iter().filter_map(|c| seq.find_item(*c).map(|(tid, _)| tid)).collect();
+    let item_set: HashSet<ClipId> = items.iter().copied().collect();
+    let tracks: HashSet<TrackId> =
+        seq.all_tracks().filter(|tr| tr.items.iter().any(|i| item_set.contains(&i.id))).map(|tr| tr.id).collect();
     let mut links = HashMap::new();
     let mut out = Vec::new();
     for tr in seq.all_tracks_mut() {
@@ -330,7 +335,7 @@ pub fn razor_items(seq: &mut Sequence, items: &[ClipId], t: Tick, ctx: &mut Edit
             continue;
         }
         // only split if the item at t is one of ours
-        if tr.item_at(t).is_some_and(|i| items.contains(&i.id))
+        if tr.item_at(t).is_some_and(|i| item_set.contains(&i.id))
             && let Some(id) = split_track_at(tr, t, ctx, &mut links)
         {
             out.push(id);
@@ -370,13 +375,14 @@ pub fn extract(seq: &mut Sequence, tracks: &[TrackId], range: TimeRange, ctx: &m
 
 /// Delete track items (leaving gaps).
 pub fn delete_items(seq: &mut Sequence, items: &[ClipId]) -> usize {
+    let item_set: HashSet<ClipId> = items.iter().copied().collect();
     let mut n = 0;
     for tr in seq.all_tracks_mut() {
         if tr.locked {
             continue;
         }
         let before = tr.items.len();
-        tr.items.retain(|i| !items.contains(&i.id));
+        tr.items.retain(|i| !item_set.contains(&i.id));
         n += before - tr.items.len();
         remove_orphan_transitions(tr);
     }
@@ -390,10 +396,11 @@ pub fn delete_items(seq: &mut Sequence, items: &[ClipId]) -> usize {
 /// closing each one's own range would move the tracks twice. Locked tracks lose nothing and do
 /// not count.
 fn ripple_delete_spans(seq: &Sequence, items: &[ClipId]) -> Vec<TimeRange> {
+    let item_set: HashSet<ClipId> = items.iter().copied().collect();
     let (mut deleted, mut kept) = (Vec::new(), Vec::new());
-    for tr in seq.all_tracks().filter(|t| !t.locked && t.items.iter().any(|i| items.contains(&i.id))) {
+    for tr in seq.all_tracks().filter(|t| !t.locked && t.items.iter().any(|i| item_set.contains(&i.id))) {
         for i in &tr.items {
-            if items.contains(&i.id) { deleted.push(i.range()) } else { kept.push(i.range()) }
+            if item_set.contains(&i.id) { deleted.push(i.range()) } else { kept.push(i.range()) }
         }
     }
     let kept = merged(kept);
@@ -442,9 +449,11 @@ fn merged(mut ranges: Vec<TimeRange>) -> Vec<TimeRange> {
 /// tracks covers all of their time): that would be a plain delete.
 pub fn ripple_delete_items(seq: &mut Sequence, items: &[ClipId]) -> Result<Vec<TimeRange>> {
     // Collect the tracks that lose an item; the gaps close right-to-left.
-    let mut affected: Vec<TrackId> = Vec::new();
+    let item_tracks: HashMap<ClipId, TrackId> =
+        seq.all_tracks().flat_map(|t| t.items.iter().map(move |i| (i.id, t.id))).collect();
+    let mut affected: Vec<TrackId> = Vec::with_capacity(items.len());
     for c in items {
-        let (tid, _) = seq.find_item(*c).ok_or(EditError::NoItem(*c))?;
+        let tid = *item_tracks.get(c).ok_or(EditError::NoItem(*c))?;
         affected.push(tid);
     }
     let spans = ripple_delete_spans(seq, items);
@@ -452,6 +461,7 @@ pub fn ripple_delete_items(seq: &mut Sequence, items: &[ClipId]) -> Result<Vec<T
         let locked = affected.iter().all(|t| seq.track(*t).is_some_and(|tr| tr.locked));
         return Err(if locked { EditError::Locked } else { EditError::Other("no gap can close: other clips on these tracks cover the deleted time".into()) });
     }
+    let affected_set: HashSet<TrackId> = affected.into_iter().collect();
     let mut work = seq.clone();
     delete_items(&mut work, items);
     for span in spans.iter().rev() {
@@ -460,7 +470,7 @@ pub fn ripple_delete_items(seq: &mut Sequence, items: &[ClipId]) -> Result<Vec<T
             if tr.locked {
                 continue;
             }
-            let on_affected = affected.contains(&tr.id);
+            let on_affected = affected_set.contains(&tr.id);
             if !on_affected && !tr.sync_lock {
                 continue;
             }
@@ -510,10 +520,12 @@ pub fn close_gap(seq: &mut Sequence, track: TrackId, t: Tick) -> Result<()> {
 /// `moves`: (item, destination track, new start).
 pub fn move_items(seq: &mut Sequence, moves: &[(ClipId, TrackId, Tick)], insert_mode: bool, ctx: &mut EditCtx) -> Result<()> {
     let mut work = seq.clone();
-    let mut placed = Vec::new();
+    let item_map: HashMap<ClipId, (TrackId, TrackItem)> =
+        work.all_tracks().flat_map(|t| t.items.iter().map(move |i| (i.id, (t.id, i.clone())))).collect();
+    let mut placed = Vec::with_capacity(moves.len());
     for (c, dest, start) in moves {
-        let (src, it) = work.find_item(*c).ok_or(EditError::NoItem(*c))?;
-        if work.track(src).is_some_and(|t| t.locked) {
+        let (src, it) = item_map.get(c).ok_or(EditError::NoItem(*c))?;
+        if work.track(*src).is_some_and(|t| t.locked) {
             return Err(EditError::Locked);
         }
         let mut it = it.clone();
@@ -549,9 +561,11 @@ pub fn move_items(seq: &mut Sequence, moves: &[(ClipId, TrackId, Tick)], insert_
 /// the order of `moves`.
 pub fn copy_items(seq: &mut Sequence, moves: &[(ClipId, TrackId, Tick)], insert_mode: bool, ctx: &mut EditCtx) -> Result<Vec<ClipId>> {
     let mut work = seq.clone();
-    let mut placed = Vec::new();
+    let item_map: HashMap<ClipId, TrackItem> =
+        work.all_tracks().flat_map(|t| t.items.iter().map(|i| (i.id, i.clone()))).collect();
+    let mut placed = Vec::with_capacity(moves.len());
     for (c, dest, start) in moves {
-        let (_, it) = work.find_item(*c).ok_or(EditError::NoItem(*c))?;
+        let it = item_map.get(c).ok_or(EditError::NoItem(*c))?;
         let mut it = it.clone();
         if work.track(*dest).ok_or(EditError::NoTrack(*dest))?.locked {
             return Err(EditError::Locked);
@@ -602,10 +616,15 @@ pub fn copy_items(seq: &mut Sequence, moves: &[(ClipId, TrackId, Tick)], insert_
 /// move together), shifted to where those clips land. A transition whose partner stays behind is
 /// dropped, as in Premiere (the drag preview leaves it where it is until the release).
 fn carried_transitions(seq: &Sequence, placed: &[(TrackId, TrackItem)]) -> Vec<(TrackId, Transition)> {
+    if !seq.all_tracks().any(|t| !t.locked && !t.transitions.is_empty()) {
+        return Vec::new();
+    }
+    let placed_map: HashMap<ClipId, (TrackId, Tick)> = placed.iter().map(|(dest, it)| (it.id, (*dest, it.start))).collect();
+    let old_starts: HashMap<ClipId, Tick> = seq.all_tracks().flat_map(|t| t.items.iter().map(|i| (i.id, i.start))).collect();
     let landing = |c: ClipId| {
-        let (dest, it) = placed.iter().find(|(_, it)| it.id == c)?;
-        let (_, old) = seq.find_item(c)?;
-        Some((*dest, it.start - old.start))
+        let &(dest, new_start) = placed_map.get(&c)?;
+        let &old_start = old_starts.get(&c)?;
+        Some((dest, new_start - old_start))
     };
     let mut carried = Vec::new();
     for tr in seq.all_tracks().filter(|t| !t.locked).flat_map(|t| t.transitions.iter()) {

@@ -3623,3 +3623,13 @@
 	Entire sequence	Toda la secuencia
 	{count} silences detected ({sec}s)	{count} silencios detectados ({sec}s)
 	Detecting silences…	Detectando silencios…
+	Fast Selection Mode (High Performance)	Modo de selección rápida (alto rendimiento)
+	Fast Selection Mode active ({count} clips)	Modo de selección rápida activo ({count} clips)
+	Fast Selection Mode active	Modo de selección rápida activo
+	Approaching limit ({count}/{limit} clips) — click for Fast Selection Mode	Acercándose al límite ({count}/{limit} clips) — clic para modo de selección rápida
+	Fast Selection Mode activated ({count} clips selected) — high-performance rendering enabled	Modo de selección rápida activado ({count} clips seleccionados) — procesamiento de alto rendimiento habilitado
+	Approaching selection limit ({count}/{limit} clips) — Fast Selection Mode will activate at {limit} clips	Acercándose al límite de selección ({count}/{limit} clips) — El modo de selección rápida se activará con {limit} clips
+	Auto (Hardware when available)	Automático (Hardware si está disponible)
+	Codec	Códec
+	GPU Acceleration	Aceleración por GPU
+	Native / CPU (Software x264)	Nativo / CPU (x264 por software)

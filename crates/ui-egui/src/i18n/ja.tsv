@@ -3622,3 +3622,13 @@
 	Entire sequence	シーケンス全体
 	{count} silences detected ({sec}s)	{count} 件の無音を検出 ({sec}秒)
 	Detecting silences…	無音を検出中…
+	Fast Selection Mode (High Performance)	高速選択モード (高パフォーマンス)
+	Fast Selection Mode active ({count} clips)	高速選択モード有効 ({count} クリップ)
+	Fast Selection Mode active	高速選択モード有効
+	Approaching limit ({count}/{limit} clips) — click for Fast Selection Mode	上限に近づいています ({count}/{limit} クリップ) — クリックで高速選択モード
+	Fast Selection Mode activated ({count} clips selected) — high-performance rendering enabled	高速選択モードが有効化されました ({count} クリップ選択中) — 高パフォーマンス描画が有効です
+	Approaching selection limit ({count}/{limit} clips) — Fast Selection Mode will activate at {limit} clips	選択上限に近づいています ({count}/{limit} クリップ) — {limit} クリップで高速選択モードが有効化されます
+	Auto (Hardware when available)	自動 (利用可能な場合はハードウェア)
+	Codec	コーデック
+	GPU Acceleration	GPUアクセラレーション
+	Native / CPU (Software x264)	ネイティブ / CPU (ソフトウェア x264)

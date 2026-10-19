@@ -371,18 +371,33 @@ fn move_clips(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let follow = bool_p(p, "linked").unwrap_or(s.state.linked_selection);
     let q = s.active_sequence().ok_or(EngineError::NoSequence)?;
+    let item_lookup: std::collections::HashMap<ClipId, (TrackId, &filmcraft_project::TrackItem)> =
+        q.all_tracks().flat_map(|t| t.items.iter().map(move |i| (i.id, (t.id, i)))).collect();
+    let mut by_link: std::collections::HashMap<u64, Vec<(TrackId, &filmcraft_project::TrackItem)>> =
+        std::collections::HashMap::new();
+    if follow {
+        for t in q.all_tracks().filter(|t| !t.locked) {
+            for item in &t.items {
+                if let Some(link) = item.link {
+                    by_link.entry(link).or_default().push((t.id, item));
+                }
+            }
+        }
+    }
+    let listed_set: std::collections::HashSet<ClipId> = listed.iter().map(|m| m.0).collect();
+    let mut planned_set: std::collections::HashSet<ClipId> = listed_set.clone();
     // (clip, destination track, new start, where a partner starts now). `time` is any i64: the
     // sums are done in i128, where a few i64 values cannot overflow, and checked on the way back.
-    let mut plan: Vec<(ClipId, TrackId, i128, Option<i128>)> = Vec::new();
+    let mut plan: Vec<(ClipId, TrackId, i128, Option<i128>)> = Vec::with_capacity(listed.len() * 2);
     for &(clip, track, time) in &listed {
         plan.push((clip, track, i128::from(time.0), None));
-        let Some((_, it)) = q.find_item(clip) else { continue }; // `edit::move_items` reports it
+        let Some(&(_, it)) = item_lookup.get(&clip) else { continue }; // `edit::move_items` reports it
         let Some(link) = it.link.filter(|_| follow) else { continue };
         let offset = i128::from(time.0) - i128::from(it.start.0);
-        for t in q.all_tracks().filter(|t| !t.locked) {
-            for partner in t.items.iter().filter(|i| i.link == Some(link)) {
-                if !listed.iter().any(|m| m.0 == partner.id) && !plan.iter().any(|m| m.0 == partner.id) {
-                    plan.push((partner.id, t.id, i128::from(partner.start.0) + offset, Some(i128::from(partner.start.0))));
+        if let Some(partners) = by_link.get(&link) {
+            for &(t_id, partner) in partners {
+                if planned_set.insert(partner.id) {
+                    plan.push((partner.id, t_id, i128::from(partner.start.0) + offset, Some(i128::from(partner.start.0))));
                 }
             }
         }
@@ -426,10 +441,12 @@ fn move_clips(s: &mut Session, p: &Value) -> Result<Value> {
             tracks.push(track);
             destinations.push((source, id));
         }
+        let new_move_map: std::collections::HashMap<ClipId, TrackId> = new_moves.iter().copied().collect();
+        let dest_map: std::collections::HashMap<TrackId, TrackId> = destinations.into_iter().collect();
         Ok(moves
             .iter()
             .map(|&(clip, track, time)| {
-                let dest = new_moves.iter().find(|m| m.0 == clip).and_then(|m| destinations.iter().find(|d| d.0 == m.1)).map_or(track, |d| d.1);
+                let dest = new_move_map.get(&clip).and_then(|src| dest_map.get(src)).copied().unwrap_or(track);
                 (clip, dest, time)
             })
             .collect())
@@ -454,16 +471,38 @@ fn move_clips(s: &mut Session, p: &Value) -> Result<Value> {
     // shortened clip may live on under a new id: name each clip the move changed without being
     // asked to, with what is left of it, so the caller hears about it instead of finding out later.
     let after = spots(s);
-    let moved = |c: u64| moves.iter().any(|m| m.0.0 == c) && !copy;
-    let new = |c: u64| !before.iter().any(|b| b.0 == c) && !copied.iter().any(|k| k.0 == c);
+    let moved_set: std::collections::HashSet<u64> =
+        if copy { std::collections::HashSet::new() } else { moves.iter().map(|m| m.0.0).collect() };
+    let before_ids: std::collections::HashSet<u64> = before.iter().map(|b| b.0).collect();
+    let copied_ids: std::collections::HashSet<u64> = copied.iter().map(|k| k.0).collect();
+    let after_by_id: std::collections::HashMap<u64, &(u64, TrackId, Tick, Tick, ItemId)> =
+        after.iter().map(|a| (a.0, a)).collect();
+    let moved = |c: u64| moved_set.contains(&c);
+    let new = |c: u64| !before_ids.contains(&c) && !copied_ids.contains(&c);
+    let mut new_by_track_item: std::collections::HashMap<(TrackId, ItemId), Vec<&(u64, TrackId, Tick, Tick, ItemId)>> =
+        std::collections::HashMap::new();
+    for a in &after {
+        if new(a.0) && !moved(a.0) {
+            new_by_track_item.entry((a.1, a.4)).or_default().push(a);
+        }
+    }
     let mut overwritten = Vec::new();
     for &(c, track, start, end, item) in before.iter().filter(|b| !moved(b.0)) {
-        let kept = after.iter().find(|a| a.0 == c);
+        let kept = after_by_id.get(&c).copied();
         if ins || kept.is_some_and(|k| (k.2, k.3) == (start, end)) {
             continue; // untouched (an insert only shifts clips, it never covers one)
         }
-        let pieces: Vec<_> =
-            after.iter().filter(|a| a.0 == c || (new(a.0) && !moved(a.0) && a.1 == track && a.4 == item && a.2 >= start && a.3 <= end)).collect();
+        let mut pieces: Vec<&(u64, TrackId, Tick, Tick, ItemId)> = Vec::new();
+        if let Some(k) = kept {
+            pieces.push(k);
+        }
+        if let Some(candidates) = new_by_track_item.get(&(track, item)) {
+            for &a in candidates {
+                if a.2 >= start && a.3 <= end {
+                    pieces.push(a);
+                }
+            }
+        }
         let now: i64 = pieces.iter().map(|a| (a.3 - a.2).0).sum();
         overwritten.push(json!({"clip": c, "was": (end - start).0, "now": now, "pieces": pieces.iter().map(|a| a.0).collect::<Vec<_>>()}));
     }
@@ -510,11 +549,12 @@ pub(crate) fn slip_together(q: &mut filmcraft_project::Sequence, ctx: &mut edit:
 pub fn audio_effect_targets(s: &Session, clips: &[ClipId]) -> Vec<ClipId> {
     let Some(seq) = s.active_sequence() else { return clips.to_vec() };
     let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for c in clips {
         let Some((tid, it)) = seq.find_item(*c) else { continue };
         let kind = seq.track(tid).map(|t| t.kind);
         if kind == Some(TrackKind::Audio) {
-            if !out.contains(c) {
+            if seen.insert(*c) {
                 out.push(*c);
             }
             continue;
@@ -525,7 +565,7 @@ pub fn audio_effect_targets(s: &Session, clips: &[ClipId]) -> Vec<ClipId> {
         let Some(link) = it.link else { continue };
         for t in &seq.audio_tracks {
             for i in &t.items {
-                if i.link == Some(link) && !out.contains(&i.id) {
+                if i.link == Some(link) && seen.insert(i.id) {
                     out.push(i.id);
                 }
             }
@@ -577,14 +617,30 @@ pub fn linked_roll_pairs(seq: &filmcraft_project::Sequence, left: ClipId, right:
 
 /// Expand a clip selection with linked partners (when linked selection is on).
 pub fn with_links(s: &Session, clips: &[ClipId]) -> Vec<ClipId> {
+    if clips.is_empty() {
+        return Vec::new();
+    }
     let Some(seq) = s.active_sequence() else { return clips.to_vec() };
     let mut out = clips.to_vec();
     if s.state.linked_selection {
-        let links: Vec<u64> = clips.iter().filter_map(|c| seq.find_item(*c).and_then(|(_, i)| i.link)).collect();
+        let want: std::collections::HashSet<ClipId> = clips.iter().copied().collect();
+        let mut links: std::collections::HashSet<u64> = std::collections::HashSet::new();
         for t in seq.all_tracks() {
             for i in &t.items {
-                if i.link.is_some_and(|l| links.contains(&l)) && !out.contains(&i.id) {
-                    out.push(i.id);
+                if want.contains(&i.id)
+                    && let Some(l) = i.link
+                {
+                    links.insert(l);
+                }
+            }
+        }
+        if !links.is_empty() {
+            let mut seen = want;
+            for t in seq.all_tracks() {
+                for i in &t.items {
+                    if i.link.is_some_and(|l| links.contains(&l)) && seen.insert(i.id) {
+                        out.push(i.id);
+                    }
                 }
             }
         }
@@ -2618,21 +2674,26 @@ query!("clip.audioPeak", "Audio Clip Peak Amplitude", r#"{"clips":[id]?}"#, |s, 
             s.state.transition_selection.clear();
             s.state.gap_selection = None;
             if bool_p(p, "toggle").unwrap_or(false) {
+                let mut existing: std::collections::HashSet<ClipId> = s.state.selection.iter().copied().collect();
+                let mut to_add = Vec::new();
                 for c in clips {
-                    if let Some(i) = s.state.selection.iter().position(|x| *x == c) {
-                        s.state.selection.remove(i);
-                    } else {
-                        s.state.selection.push(c);
+                    if !existing.remove(&c) {
+                        existing.insert(c);
+                        to_add.push(c);
                     }
                 }
+                s.state.selection.retain(|c| existing.contains(c));
+                s.state.selection.extend(to_add);
             } else if bool_p(p, "add").unwrap_or(false) {
+                let mut existing: std::collections::HashSet<ClipId> = s.state.selection.iter().copied().collect();
                 for c in clips {
-                    if !s.state.selection.contains(&c) {
+                    if existing.insert(c) {
                         s.state.selection.push(c);
                     }
                 }
             } else {
-                s.state.selection = clips;
+                let mut seen = std::collections::HashSet::with_capacity(clips.len());
+                s.state.selection = clips.into_iter().filter(|c| seen.insert(*c)).collect();
                 s.state.caption_selection.clear();
             }
             Ok(json!({"selection": s.state.selection.iter().map(|c| c.0).collect::<Vec<_>>()}))
