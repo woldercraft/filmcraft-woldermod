@@ -3637,3 +3637,7 @@
 	Selecting {count} clips in Traditional Mode can freeze the application. Switch to Fast Selection Mode for high-performance editing.	Seleccionar {count} clips en modo tradicional puede congelar la aplicación. Cambia al modo de selección rápida para editar con alto rendimiento.
 	⚡ Switch to Fast Selection Mode	⚡ Cambiar a modo de selección rápida
 	Keep Traditional Mode	Mantener modo tradicional
+	Do not show this message again (remember choice)	No volver a mostrar este mensaje (recordar elección)
+	Apply Changes (Enter)	Aplicar cambios (Enter)
+	Cancel (Esc)	Cancelar (Esc)
+	Pending Move: {count} clips ({offset})	Movimiento pendiente: {count} clips ({offset})

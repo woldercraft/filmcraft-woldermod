@@ -262,17 +262,28 @@ fn unlocked_track(seq: &Sequence, clip: ClipId) -> Result<TrackId> {
 /// Overwrite edits: each item replaces material on its track.
 pub fn overwrite(seq: &mut Sequence, placements: Vec<(TrackId, TrackItem)>, ctx: &mut EditCtx) -> Result<Vec<ClipId>> {
     let mut links = HashMap::new();
-    let mut ids = Vec::new();
+    let mut ids = Vec::with_capacity(placements.len());
     for (tid, _) in &placements {
         if track_mut(seq, *tid)?.locked {
             return Err(EditError::Locked);
         }
     }
+    let mut by_track: HashMap<TrackId, Vec<TrackItem>> = HashMap::new();
     for (tid, item) in placements {
-        let t = track_mut(seq, tid)?;
-        clear_track_range(t, item.range(), ctx, &mut links);
         ids.push(item.id);
-        place(t, item);
+        by_track.entry(tid).or_default().push(item);
+    }
+    for (tid, items) in by_track {
+        let t = track_mut(seq, tid)?;
+        if t.items.is_empty() {
+            t.items = items;
+            t.items.sort_unstable_by_key(|i| i.start);
+        } else {
+            for item in items {
+                clear_track_range(t, item.range(), ctx, &mut links);
+                place(t, item);
+            }
+        }
     }
     Ok(ids)
 }

@@ -211,6 +211,9 @@ pub struct TimelineView {
     /// Lightweight high-performance mode for heavy multi-clip selections and drags.
     #[serde(default)]
     pub fast_selection_mode: bool,
+    /// Do not show the prompt dialog suggesting to switch to Fast Selection Mode.
+    #[serde(default)]
+    pub fast_mode_prompt_never_show: bool,
 }
 
 impl TimelineView {
@@ -242,6 +245,7 @@ impl Default for TimelineView {
             fit_empty: None,
             track_lanes: Default::default(),
             fast_selection_mode: false,
+            fast_mode_prompt_never_show: false,
         }
     }
 }
