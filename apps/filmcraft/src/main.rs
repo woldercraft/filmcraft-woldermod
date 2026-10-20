@@ -216,10 +216,12 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
         // voice-over recording reads the microphone through cpal
         session.voiceover.input = Some(Box::new(audio_in::CpalIn::new(&session.prefs.audio_hardware.device_class)));
         let (project, media) = args::project_and_media(&files);
-        if let Some(p) = project {
+        if let Some(ref p) = project {
             if let Err(e) = session.execute("file.open", json!({"path": p})) {
                 log::error!("{e}");
             }
+        } else if startup_flag && demo {
+            let _ = session.execute("file.openDemoProject", json!({}));
         } else if !startup_flag && session.prefs.general.at_startup == "openMostRecent" {
             // Settings ▸ General ▸ At Startup ▸ Open Most Recent
             let recent = session.prefs.general.recent_projects.iter().find(|p| std::path::Path::new(p).exists()).cloned();
@@ -234,6 +236,8 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
                 }
             }
         } else if !startup_flag && session.prefs.general.at_startup == "emptyProject" {
+        } else if !startup_flag && session.prefs.general.at_startup == "showHome" {
+            // DaVinci Resolve Project Manager / Home: do not load demo project
         } else if demo {
             let _ = session.execute("file.openDemoProject", json!({}));
         }
@@ -248,6 +252,9 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
             }
         }
         let mut app = FilmcraftApp::new(session);
+        if project.is_none() && media.is_empty() && !startup_flag && app.session.prefs.general.at_startup == "showHome" {
+            app.ui.mode = filmcraft_ui_egui::state::Mode::Import;
+        }
         app.graphics_notice = notice;
         if recover == Some(false) {
             app.dialog = None;

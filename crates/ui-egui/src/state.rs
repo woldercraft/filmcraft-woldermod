@@ -500,6 +500,9 @@ pub struct UiState {
     /// Export mode: settings, preset, destination, range, the Preset Manager and Quick Export.
     #[serde(default)]
     pub export: crate::panels::export_mode::ExportUi,
+    /// DaVinci Resolve-style Project Manager / Browser.
+    #[serde(default)]
+    pub project_browser: crate::panels::project_manager::ProjectManagerUi,
     /// Text panel: active tab ("Transcript" / "Captions" / "Graphics").
     #[serde(default = "captions_tab")]
     pub text_tab: String,
@@ -996,6 +999,7 @@ impl Default for UiState {
             essential_sound_tab: "Edit".into(),
             tts: Default::default(),
             export: Default::default(),
+            project_browser: Default::default(),
             text_tab: captions_tab(),
             caption_search: String::new(),
             transcript_sel: None,

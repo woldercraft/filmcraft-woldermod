@@ -2161,7 +2161,7 @@ fn draw_top(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, seq: &Sequenc
     p.rect_filled(Rect::from_min_max(rect.min, pos2(rect.max.x, ruler.max.y)), 0.0, t.panel_bg);
     // current timecode: Premiere's big blue timecode
     let tc = format_time(app.session.playhead(), rate, seq.settings.drop_frame, TimeDisplay::Timecode, seq.settings.sample_rate as i64);
-    let tc_rect = Rect::from_min_size(pos2(rect.min.x + 14.0, rect.min.y + 4.0), vec2(hw - 20.0, 20.0));
+    let tc_rect = Rect::from_min_size(pos2(rect.min.x + 14.0, rect.min.y + 4.0), vec2(hw - 44.0, 20.0));
     let tc_id = egui::Id::new(("timeline-tc", seq_id));
     match crate::widgets::timecode_field(ui, tc_id, tc_rect, &tc, app.session.playhead(), Tick::ZERO, rate, seq.settings.drop_frame, t.timecode) {
         Some(Ok(time)) => {
@@ -2173,16 +2173,33 @@ fn draw_top(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, seq: &Sequenc
         None => {}
     }
     app.auto.add("timeline.timecode", tc_rect, &tc);
+
+    // Macro Timeline (Dual View) toggle button cleanly placed in track header corner (never touches ruler)
+    let macro_btn_rect = Rect::from_min_size(pos2(rect.min.x + hw - 26.0, rect.min.y + 3.0), vec2(22.0, 22.0));
+    let macro_active = app.ui.timeline.show_macro_timeline;
+    let m_resp = ui.interact(macro_btn_rect, egui::Id::new("tl-macro-toggle"), Sense::click())
+        .on_hover_text(tl!("Toggle Macro Timeline (Dual View)"));
+    app.auto.add("timeline.toggle.macro", macro_btn_rect, "Toggle Macro Timeline (Dual View)");
+    if macro_active {
+        p.rect_filled(macro_btn_rect, 4.0, t.pressed);
+        p.rect_stroke(macro_btn_rect, 4.0, Stroke::new(1.0, Color32::from_rgb(245, 195, 55)), StrokeKind::Inside);
+    } else if m_resp.hovered() {
+        p.rect_filled(macro_btn_rect, 4.0, t.hover);
+    }
+    icons::paint(&p, macro_btn_rect.shrink(5.0), Icon::Sequence, if macro_active { Color32::from_rgb(245, 195, 55) } else { t.text_dim });
+    if m_resp.clicked() {
+        app.ui.timeline.show_macro_timeline = !app.ui.timeline.show_macro_timeline;
+    }
+
     // toolbar: 30 × 30 buttons, "on" = #4b4b4b fill
     let mut x = rect.min.x + 12.0;
     let y = rect.min.y + 26.0;
-    let toggles: [(Icon, &str, bool, bool, &str); 7] = [
+    let toggles: [(Icon, &str, bool, bool, &str); 6] = [
         (Icon::Nest, "nest", !app.session.state.sequences_as_clips, true, tl!("Insert and overwrite sequences as nests or individual clips")),
         (Icon::Magnet, "snap", app.session.state.snapping, true, tl!("Snap in Timeline (S)")),
         (Icon::Link, "linked", app.session.state.linked_selection, true, tl!("Linked Selection")),
         (Icon::Captions, "captions", false, false, tl!("Caption track options")),
         (Icon::Marker, "marker", false, false, tl!("Add Marker (M)")),
-        (Icon::Sequence, "macro", app.ui.timeline.show_macro_timeline, true, tl!("Toggle Macro Timeline (Dual View)")),
         (Icon::Wrench, "settings", false, false, tl!("Timeline Display Settings")),
     ];
     for (icon, key, on, toggle, tip) in toggles {
@@ -2201,10 +2218,6 @@ fn draw_top(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, seq: &Sequenc
                 "snap" => app.session.execute("sequence.snap", json!({})),
                 "linked" => app.session.execute("sequence.linkedSelection", json!({})),
                 "marker" => app.session.execute("markers.add", json!({})),
-                "macro" => {
-                    app.ui.timeline.show_macro_timeline = !app.ui.timeline.show_macro_timeline;
-                    Ok(Value::Null)
-                }
                 _ => Ok(Value::Null),
             };
         }

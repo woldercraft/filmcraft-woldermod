@@ -153,12 +153,12 @@ fn render_macro_timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, 
     p.rect_filled(rect, 0.0, if in_timeline { t.panel_bg } else { t.app_bg });
 
     let Some(seq_id) = app.session.state.active_sequence else {
-        p.text(rect.center(), Align2::CENTER_CENTER, tl!("No active sequence"), Tokens::ui(12.0), t.text_faint);
+        p.text(rect.center(), Align2::CENTER_CENTER, "No active sequence", Tokens::ui(12.0), t.text_faint);
         return;
     };
     let project = app.session.project.clone();
     let Some(seq) = project.sequence(seq_id) else {
-        p.text(rect.center(), Align2::CENTER_CENTER, tl!("No active sequence"), Tokens::ui(12.0), t.text_faint);
+        p.text(rect.center(), Align2::CENTER_CENTER, "No active sequence", Tokens::ui(12.0), t.text_faint);
         return;
     };
 
@@ -188,11 +188,30 @@ fn render_macro_timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, 
         Color32::from_rgb(245, 195, 55),
     );
 
-    // Fast Mode Toggle Button (right edge)
+    // Right cluster: Close Button (if strip) and Fast Mode Toggle
+    let mut rx = header_rect.max.x - 6.0;
+    if in_timeline {
+        let close_w = 22.0;
+        rx -= close_w;
+        let close_rect = Rect::from_min_size(pos2(rx, header_rect.min.y + 3.0), vec2(close_w, header_h - 6.0));
+        let close_resp = ui.interact(close_rect, egui::Id::new("macro-tl-close-btn"), Sense::click())
+            .on_hover_text("Hide Macro Timeline");
+        if close_resp.hovered() {
+            p.rect_filled(close_rect, 3.0, t.hover);
+        }
+        p.text(close_rect.center(), Align2::CENTER_CENTER, "✕", Tokens::ui(11.0), t.text_dim);
+        if close_resp.clicked() {
+            app.ui.timeline.show_macro_timeline = false;
+        }
+        rx -= 6.0;
+    }
+
+    // Fast Mode Toggle Button
     let fast_mode = app.ui.timeline.fast_selection_mode;
-    let fast_btn_label = if fast_mode { tl!("⚡ Fast Mode: ON") } else { tl!("Fast Mode: OFF") };
+    let fast_btn_label = if fast_mode { "⚡ Fast Mode: ON" } else { "Fast Mode: OFF" };
     let fast_btn_w = 105.0;
-    let fast_btn_rect = Rect::from_min_size(pos2(header_rect.max.x - fast_btn_w - 6.0, header_rect.min.y + 3.0), vec2(fast_btn_w, header_h - 6.0));
+    rx -= fast_btn_w;
+    let fast_btn_rect = Rect::from_min_size(pos2(rx, header_rect.min.y + 3.0), vec2(fast_btn_w, header_h - 6.0));
     let fast_resp = ui.interact(fast_btn_rect, egui::Id::new("macro-tl-fast-toggle"), Sense::click());
     if fast_resp.clicked() {
         app.ui.timeline.fast_selection_mode = !app.ui.timeline.fast_selection_mode;
@@ -211,7 +230,7 @@ fn render_macro_timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, 
     );
 
     // Middle Quick Action Nudge & Alignment Buttons
-    let mut mid_x = fast_btn_rect.min.x - 8.0;
+    let mut mid_x = rx - 8.0;
     let nudge_btns = [
         ("+5s ▶▶", Tick::from_seconds_f64(5.0), 44.0),
         ("+1s ▶", Tick::from_seconds_f64(1.0), 38.0),
