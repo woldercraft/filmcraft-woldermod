@@ -285,8 +285,11 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
                 .map(|p| p.to_string_lossy().to_string())
         }));
         app.hooks.pick_save = Some(Box::new(|name: &str| {
+            let storage = filmcraft_ui_egui::panels::project_manager::projects_storage_dir();
+            let _ = std::fs::create_dir_all(&storage);
             rfd::FileDialog::new()
                 .add_filter(filmcraft_ui_egui::i18n::t("FilmCraft Project"), &file_filters::extensions(&["fcproj"]))
+                .set_directory(&storage)
                 .set_file_name(name)
                 .save_file()
                 .map(|p| p.to_string_lossy().to_string())
@@ -334,8 +337,11 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
                 .map(|p| p.to_string_lossy().to_string())
         }));
         app.hooks.pick_open_project = Some(Box::new(|| {
+            let storage = filmcraft_ui_egui::panels::project_manager::projects_storage_dir();
+            let _ = std::fs::create_dir_all(&storage);
             rfd::FileDialog::new()
                 .add_filter(filmcraft_ui_egui::i18n::t("FilmCraft Project"), &file_filters::extensions(&["fcproj"]))
+                .set_directory(&storage)
                 .pick_file()
                 .map(|p| p.to_string_lossy().to_string())
         }));

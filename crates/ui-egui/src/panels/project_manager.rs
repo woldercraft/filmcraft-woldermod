@@ -114,16 +114,38 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-fn projects_storage_dir() -> PathBuf {
+pub fn projects_storage_dir() -> PathBuf {
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        let proyectos = home.join("Proyectos");
+        if proyectos.is_dir() {
+            return proyectos.join("FilmCraft");
+        }
+        let docs = home.join("Documentos");
+        if docs.is_dir() {
+            return docs.join("FilmCraft");
+        }
+        let eng_docs = home.join("Documents");
+        if eng_docs.is_dir() {
+            return eng_docs.join("FilmCraft Projects");
+        }
+        return home.join("Proyectos").join("FilmCraft");
+    }
     default_data_dir()
         .map(|d| d.join("Projects"))
         .unwrap_or_else(|| PathBuf::from("Projects"))
 }
 
 fn load_persisted_manager(app: &mut FilmcraftApp) {
-    let data_file = projects_storage_dir().join("project_manager.json");
-    if let Ok(content) = fs::read_to_string(&data_file) {
-        if let Ok(saved) = serde_json::from_str::<ProjectManagerUi>(&content) {
+    let storage = projects_storage_dir();
+    let data_file = storage.join("project_manager.json");
+    let fallback = default_data_dir().map(|d| d.join("Projects").join("project_manager.json"));
+
+    let content = fs::read_to_string(&data_file)
+        .ok()
+        .or_else(|| fallback.and_then(|f| fs::read_to_string(f).ok()));
+
+    if let Some(c) = content {
+        if let Ok(saved) = serde_json::from_str::<ProjectManagerUi>(&c) {
             app.ui.project_browser.folders = saved.folders;
             app.ui.project_browser.project_folders = saved.project_folders;
             app.ui.project_browser.view_mode = saved.view_mode;
@@ -146,8 +168,17 @@ pub fn discover_projects(app: &FilmcraftApp) -> Vec<ProjectCard> {
     let mut seen_paths = std::collections::HashSet::new();
 
     let storage_dir = projects_storage_dir();
-    if storage_dir.exists() {
-        if let Ok(entries) = fs::read_dir(&storage_dir) {
+    let _ = fs::create_dir_all(&storage_dir);
+
+    let mut scan_dirs = vec![storage_dir.clone()];
+    if let Some(old_storage) = default_data_dir().map(|d| d.join("Projects")) {
+        if old_storage != storage_dir && old_storage.exists() {
+            scan_dirs.push(old_storage);
+        }
+    }
+
+    for dir in scan_dirs {
+        if let Ok(entries) = fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
@@ -490,10 +521,19 @@ fn render_sidebar(app: &mut FilmcraftApp, ui: &mut Ui, rect: Rect, total_count: 
 
     // Local Library tile
     let lib_r = Rect::from_min_size(pos2(rect.min.x + 8.0, y), vec2(rect.width() - 16.0, 30.0));
-    p.rect_filled(lib_r, 4.0, Color32::from_rgb(28, 34, 44));
+    let lib_resp = ui.interact(lib_r, Id::new("pm-side-lib-local"), Sense::click())
+        .on_hover_text("Abrir carpeta de proyectos en el explorador de archivos");
+    p.rect_filled(lib_r, 4.0, if lib_resp.hovered() { Color32::from_rgb(38, 48, 62) } else { Color32::from_rgb(28, 34, 44) });
     p.rect_stroke(lib_r, 4.0, Stroke::new(1.0, Color32::from_rgb(45, 60, 85)), StrokeKind::Inside);
     icons::paint(&p, Rect::from_center_size(pos2(lib_r.min.x + 18.0, lib_r.center().y), vec2(14.0, 14.0)), Icon::Home, Color32::from_rgb(100, 180, 255));
     p.text(pos2(lib_r.min.x + 32.0, lib_r.center().y), Align2::LEFT_CENTER, "Esta Máquina (Local)", Tokens::semibold(11.0), Color32::WHITE);
+    icons::paint(&p, Rect::from_center_size(pos2(lib_r.max.x - 14.0, lib_r.center().y), vec2(12.0, 12.0)), Icon::Folder, Color32::from_rgb(130, 140, 155));
+    if lib_resp.clicked() {
+        let storage = projects_storage_dir();
+        let _ = fs::create_dir_all(&storage);
+        let ctx = ui.ctx().clone();
+        let _ = crate::panels::menu_dialogs::open_path(app, &ctx, &storage.to_string_lossy(), false);
+    }
     y += 40.0;
 
     // Cloud / Network item
@@ -577,9 +617,19 @@ fn render_sidebar(app: &mut FilmcraftApp, ui: &mut Ui, rect: Rect, total_count: 
 }
 
 fn render_content(app: &mut FilmcraftApp, ui: &mut Ui, rect: Rect, projects: &[ProjectCard]) {
+    // Generous breathing margins: 32px on the left (clear separation from sidebar line),
+    // 24px on the right, 20px top and bottom
+    let pad_left = 32.0;
+    let pad_right = 24.0;
+    let pad_y = 20.0;
+    let padded_rect = Rect::from_min_max(
+        pos2(rect.min.x + pad_left, rect.min.y + pad_y),
+        pos2(rect.max.x - pad_right, rect.max.y - pad_y),
+    );
+
     let mut content_ui = ui.new_child(
         egui::UiBuilder::new()
-            .max_rect(rect)
+            .max_rect(padded_rect)
             .layout(egui::Layout::top_down(egui::Align::Min)),
     );
 
@@ -598,10 +648,10 @@ fn render_grid_view(app: &mut FilmcraftApp, ui: &mut Ui, projects: &[ProjectCard
     let card_w = app.ui.project_browser.card_size;
     let card_h = card_w * (9.0 / 16.0) + 52.0;
 
-    let avail_w = ui.available_width() - 32.0;
+    let avail_w = ui.available_width();
     let cols = ((avail_w / (card_w + 16.0)).floor() as usize).max(1);
 
-    ui.add_space(16.0);
+    ui.add_space(4.0);
     egui::Grid::new("pm-project-grid")
         .spacing(vec2(16.0, 16.0))
         .min_col_width(card_w)
@@ -651,6 +701,7 @@ fn render_grid_view(app: &mut FilmcraftApp, ui: &mut Ui, projects: &[ProjectCard
             let mut project_to_rename = None;
             let mut project_to_delete = None;
             let mut move_project_to_folder: Option<(String, String)> = None;
+            let mut move_to_storage: Option<String> = None;
 
             for prj in projects {
                 let is_selected = app.ui.project_browser.selected_path.as_deref() == Some(&prj.path);
@@ -756,6 +807,14 @@ fn render_grid_view(app: &mut FilmcraftApp, ui: &mut Ui, projects: &[ProjectCard
                                 }
                             }
                         });
+                        let storage_dir = projects_storage_dir();
+                        let is_in_storage = Path::new(&path_clone).starts_with(&storage_dir);
+                        if !is_in_storage {
+                            if ui.button("Mover a carpeta de proyectos").clicked() {
+                                move_to_storage = Some(path_clone.clone());
+                                ui.close();
+                            }
+                        }
                         ui.separator();
                         if ui.button("Eliminar de la lista").clicked() {
                             project_to_delete = Some(path_clone.clone());
@@ -778,6 +837,9 @@ fn render_grid_view(app: &mut FilmcraftApp, ui: &mut Ui, projects: &[ProjectCard
             if let Some((path, name)) = project_to_rename {
                 app.ui.project_browser.rename_modal = Some(path);
                 app.ui.project_browser.modal_input = name;
+            }
+            if let Some(path) = move_to_storage {
+                move_project_to_storage(&path, app);
             }
             if let Some((path, f)) = move_project_to_folder {
                 if f.is_empty() {
@@ -831,7 +893,7 @@ fn render_list_view(app: &mut FilmcraftApp, ui: &mut Ui, projects: &[ProjectCard
     let row_h = 32.0;
     let header_h = 26.0;
 
-    let avail_w = ui.available_width() - 32.0;
+    let avail_w = ui.available_width();
     let col_name_w = (avail_w * 0.35).max(180.0);
     let col_folder_w = 120.0;
     let col_time_w = 140.0;
@@ -1190,6 +1252,29 @@ fn rename_project_file(orig_path: &str, new_name: &str, app: &mut FilmcraftApp) 
                 app.ui.project_browser.project_folders.insert(dest_str, folder);
             }
             save_persisted_manager(app);
+        }
+    }
+}
+
+fn move_project_to_storage(orig_path: &str, app: &mut FilmcraftApp) {
+    let p = Path::new(orig_path);
+    if p.exists() {
+        let storage = projects_storage_dir();
+        let _ = fs::create_dir_all(&storage);
+        if let Some(file_name) = p.file_name() {
+            let dest = storage.join(file_name);
+            if fs::copy(p, &dest).is_ok() {
+                let dest_str = dest.to_string_lossy().to_string();
+                for rec in &mut app.session.prefs.general.recent_projects {
+                    if rec == orig_path {
+                        *rec = dest_str.clone();
+                    }
+                }
+                if let Some(folder) = app.ui.project_browser.project_folders.remove(orig_path) {
+                    app.ui.project_browser.project_folders.insert(dest_str, folder);
+                }
+                save_persisted_manager(app);
+            }
         }
     }
 }
