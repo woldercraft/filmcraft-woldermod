@@ -3582,3 +3582,19 @@
 	Open a sequence to search its graphics	Buka sekuens untuk mencari di grafisnya
 	No text graphics in this sequence. Add text with the Type tool.	Tidak ada grafis teks di sekuens ini. Tambahkan teks dengan alat Teks.
 	No matching text.	Tidak ada teks yang cocok.
+# Sequence ▸ Remove Silence
+	Remove Silence…	Hapus Keheningan…
+	Remove Silence	Hapus Keheningan
+	Threshold:	Ambang batas:
+	Pre head:	Margin awal:
+	Post tail:	Margin akhir:
+	Minimum to strip:	Panjang hening minimum:
+	Preview:	Pratinjau:
+	Visible area	Area yang terlihat
+	Entire clip	Seluruh klip
+	Entire sequence	Seluruh urutan
+	{count} silences detected ({sec}s)	{count} keheningan terdeteksi ({sec}d)
+	Detecting silences…	Mendeteksi keheningan…
+	Remove	Hapus
+	No silence found matching the criteria	Tidak ada keheningan yang cocok dengan kriteria
+	Removed {count} silences ({sec}s)	Dihapus {count} keheningan ({sec}d)

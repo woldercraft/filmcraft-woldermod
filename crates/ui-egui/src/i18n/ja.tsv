@@ -3616,3 +3616,19 @@
 	Open a sequence to search its graphics	シーケンスを開くとグラフィックスを検索できます
 	No text graphics in this sequence. Add text with the Type tool.	このシーケンスにはテキストのグラフィックスがありません。文字ツールでテキストを追加してください。
 	No matching text.	一致するテキストはありません。
+# Sequence ▸ Remove Silence
+	Remove Silence…	無音を削除…
+	Remove Silence	無音を削除
+	Threshold:	しきい値:
+	Pre head:	開始マージン:
+	Post tail:	終了マージン:
+	Minimum to strip:	削除する最小無音時間:
+	Preview:	プレビュー:
+	Visible area	表示領域
+	Entire clip	クリップ全体
+	Entire sequence	シーケンス全体
+	{count} silences detected ({sec}s)	{count} か所の無音を検出 ({sec}秒)
+	Detecting silences…	無音を検出中…
+	Remove	削除
+	No silence found matching the criteria	条件に一致する無音は見つかりませんでした
+	Removed {count} silences ({sec}s)	{count} か所の無音を削除しました ({sec}秒)

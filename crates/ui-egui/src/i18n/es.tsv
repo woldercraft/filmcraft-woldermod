@@ -3617,3 +3617,19 @@
 	Open a sequence to search its graphics	Abre una secuencia para buscar en sus gráficos
 	No text graphics in this sequence. Add text with the Type tool.	Esta secuencia no tiene gráficos con texto. Añade texto con la herramienta Texto.
 	No matching text.	Ningún texto coincide.
+# Sequence ▸ Remove Silence
+	Remove Silence…	Eliminar silencio…
+	Remove Silence	Eliminar silencio
+	Threshold:	Umbral:
+	Pre head:	Margen inicial:
+	Post tail:	Margen final:
+	Minimum to strip:	Silencio mínimo a eliminar:
+	Preview:	Vista previa:
+	Visible area	Área visible
+	Entire clip	Todo el clip
+	Entire sequence	Toda la secuencia
+	{count} silences detected ({sec}s)	{count} silencios detectados ({sec}s)
+	Detecting silences…	Detectando silencios…
+	Remove	Eliminar
+	No silence found matching the criteria	No se encontró silencio que cumpla los criterios
+	Removed {count} silences ({sec}s)	{count} silencios eliminados ({sec}s)

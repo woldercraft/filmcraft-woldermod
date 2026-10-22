@@ -360,3 +360,19 @@
 	Zoom to Sequence	Умістити секвенцію
 	Project Notes	Нотатки проєкту
 
+# Sequence ▸ Remove Silence
+	Remove Silence…	Видалити тишу…
+	Remove Silence	Видалити тишу
+	Threshold:	Поріг:
+	Pre head:	Початковий запас:
+	Post tail:	Кінцевий запас:
+	Minimum to strip:	Мінімальна довжина тиші:
+	Preview:	Попередній перегляд:
+	Visible area	Видима область
+	Entire clip	Весь кліп
+	Entire sequence	Вся послідовність
+	{count} silences detected ({sec}s)	Виявлено пауз: {count} ({sec} с)
+	Detecting silences…	Пошук пауз…
+	Remove	Видалити
+	No silence found matching the criteria	Тиші за вказаними критеріями не знайдено
+	Removed {count} silences ({sec}s)	Видалено пауз: {count} ({sec} с)

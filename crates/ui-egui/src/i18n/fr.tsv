@@ -3584,3 +3584,19 @@
 	Open a sequence to search its graphics	Ouvrez une séquence pour rechercher dans ses graphiques
 	No text graphics in this sequence. Add text with the Type tool.	Aucun graphique avec du texte dans cette séquence. Ajoutez du texte avec l'outil Texte.
 	No matching text.	Aucun texte ne correspond.
+# Sequence ▸ Remove Silence
+	Remove Silence…	Supprimer les silences…
+	Remove Silence	Supprimer les silences
+	Threshold:	Seuil :
+	Pre head:	Marge de début :
+	Post tail:	Marge de fin :
+	Minimum to strip:	Durée minimale de silence :
+	Preview:	Aperçu :
+	Visible area	Zone visible
+	Entire clip	Clip entier
+	Entire sequence	Séquence entière
+	{count} silences detected ({sec}s)	{count} silences détectés ({sec}s)
+	Detecting silences…	Détection des silences…
+	Remove	Supprimer
+	No silence found matching the criteria	Aucun silence correspondant aux critères n'a été trouvé
+	Removed {count} silences ({sec}s)	{count} silences supprimés ({sec}s)

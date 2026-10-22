@@ -3585,3 +3585,19 @@
 	Open a sequence to search its graphics	Abra uma sequência para pesquisar nos gráficos dela
 	No text graphics in this sequence. Add text with the Type tool.	Esta sequência não tem gráficos com texto. Adicione texto com a ferramenta Texto.
 	No matching text.	Nenhum texto corresponde.
+# Sequence ▸ Remove Silence
+	Remove Silence…	Remover silêncio…
+	Remove Silence	Remover silêncio
+	Threshold:	Limiar:
+	Pre head:	Margem inicial:
+	Post tail:	Margem final:
+	Minimum to strip:	Duração mínima de silêncio:
+	Preview:	Visualização:
+	Visible area	Área visível
+	Entire clip	Clipe inteiro
+	Entire sequence	Sequência inteira
+	{count} silences detected ({sec}s)	{count} silêncios detectados ({sec}s)
+	Detecting silences…	Detectando silêncios…
+	Remove	Remover
+	No silence found matching the criteria	Nenhum silêncio correspondente aos critérios foi encontrado
+	Removed {count} silences ({sec}s)	Removidos {count} silêncios ({sec}s)

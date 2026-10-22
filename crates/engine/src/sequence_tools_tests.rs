@@ -671,3 +671,90 @@ fn move_to_new_track_adds_it_in_one_undo_step() {
     assert_eq!(*s.active_sequence().unwrap(), before);
     assert_eq!(s.history.undo.len(), undo);
 }
+
+#[test]
+fn remove_silence_deletes_silence_and_is_single_undo() {
+    let (mut s, item) = fresh();
+    // Place two 20-frame clips separated by a 40-frame silent gap
+    let _c1 = place(&mut s, item, "V1", 0, 0, 20);
+    let _c2 = place(&mut s, item, "V1", 60, 0, 20);
+
+    let initial_dur = s.active_sequence().unwrap().duration();
+    let undo_count_before = s.history.undo.len();
+
+    let r = s
+        .execute(
+            "sequence.removeSilence",
+            json!({
+                "threshold": -10.0,
+                "preHead": 0,
+                "postTail": 0,
+                "minStrip": 5
+            }),
+        )
+        .unwrap();
+
+    let removed = r["removed"].as_u64().unwrap();
+    assert!(removed > 0, "must detect and remove at least one silence");
+
+    let dur_after = s.active_sequence().unwrap().duration();
+    assert!(dur_after < initial_dur, "sequence duration must decrease after removing silence");
+    assert_eq!(s.history.undo.len(), undo_count_before + 1, "exactly one undo step must be added");
+
+    // Single undo must restore the entire sequence
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(s.history.undo.len(), undo_count_before);
+    assert_eq!(s.active_sequence().unwrap().duration(), initial_dur, "undo must restore exact duration");
+}
+
+#[test]
+fn clip_remove_silence_works_and_is_single_undo() {
+    let (mut s, item) = fresh();
+    let c1 = place(&mut s, item, "V1", 0, 0, 20);
+    let _c2 = place(&mut s, item, "V1", 60, 0, 20);
+
+    s.state.selection = vec![filmcraft_project::ClipId(c1[0])];
+    let initial_dur = s.active_sequence().unwrap().duration();
+    let undo_count_before = s.history.undo.len();
+
+    let r = s
+        .execute(
+            "clip.removeSilence",
+            json!({
+                "threshold": -10.0,
+                "preHead": 0,
+                "postTail": 0,
+                "minStrip": 5
+            }),
+        )
+        .unwrap();
+
+    assert!(r.get("removed").is_some());
+    if r["removed"].as_u64().unwrap() > 0 {
+        assert_eq!(s.history.undo.len(), undo_count_before + 1);
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(s.active_sequence().unwrap().duration(), initial_dur);
+    }
+}
+
+#[test]
+fn remove_silence_hostile_parameters_never_panic() {
+    let (mut s, item) = fresh();
+    let _c = place(&mut s, item, "V1", 0, 0, 20);
+
+    // Hostile bounds, overflow values and NaN/Inf floats
+    let hostile_payloads = [
+        json!({"threshold": f64::NAN, "preHead": u64::MAX, "postTail": u64::MAX, "minStrip": u64::MAX}),
+        json!({"threshold": f64::INFINITY, "preHead": 999999999u64, "postTail": 999999999u64, "minStrip": 0}),
+        json!({"threshold": -1000000.0, "preHead": 0, "postTail": 0, "minStrip": 999999999u64}),
+        json!({"threshold": 1000000.0, "preHead": 120, "postTail": 120, "minStrip": 300}),
+    ];
+
+    for payload in hostile_payloads {
+        // Must succeed safely or return an error, NEVER panic
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = s.execute("sequence.removeSilence", payload);
+        }));
+        assert!(res.is_ok(), "hostile parameters caused a panic");
+    }
+}

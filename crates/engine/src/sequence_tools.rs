@@ -32,9 +32,16 @@ use filmcraft_time::{Tick, TimeRange};
 use serde_json::{Value, json};
 
 use crate::commands::{
-    CommandSpec, always, bad, bool_p, clips_p, has_seq, marker_color_p, sequence_time_p, source_mark_time, str_p, time_p, track_p, with_links,
+    CommandSpec, always, bad, bool_p, clips_p, f64_p, has_seq, marker_color_p, sequence_time_p, source_mark_time, str_p, time_p, track_p, u64_p, with_links,
 };
 use crate::{EngineError, Result, Session};
+
+pub const DEFAULT_SILENCE_THRESHOLD_DB: f32 = -30.6;
+pub const DEFAULT_SILENCE_PRE_HEAD_FRAMES: usize = 10;
+pub const DEFAULT_SILENCE_POST_TAIL_FRAMES: usize = 12;
+pub const DEFAULT_SILENCE_MIN_STRIP_FRAMES: usize = 23;
+pub const MAX_SILENCE_PAD_FRAMES: usize = 120;
+pub const MAX_SILENCE_STRIP_FRAMES: usize = 300;
 
 type Run = fn(&mut Session, &Value) -> Result<Value>;
 type Enabled = fn(&Session) -> std::result::Result<(), String>;
@@ -77,6 +84,15 @@ fn groups() -> Vec<(&'static str, Vec<CommandSpec>)> {
         (
             "sequence.closeGap",
             vec![
+                spec(
+                    "sequence.removeSilence",
+                    "Remove Silence…",
+                    &["Sequence"],
+                    None,
+                    r#"{"threshold":f?,"preHead":n?,"postTail":n?,"minStrip":n?}"#,
+                    has_seq,
+                    remove_silence,
+                ),
                 spec("sequence.goToNextGap", "Next in Sequence", &["Sequence", "Go to Gap"], Some("Shift+;"), "{}", has_seq, |s, p| {
                     go_to_gap(s, p, true, false)
                 }),
@@ -1025,4 +1041,182 @@ fn filter_colors(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad("markers.filterColors", "need `hidden` or `color`"));
     }
     Ok(json!({"hidden": s.state.hidden_marker_colors.iter().map(|c| c.name()).collect::<Vec<_>>()}))
+}
+
+/// Detect contiguous silent ranges in a sequence.
+///
+/// Parameters are safely clamped:
+/// - `threshold_db` is clamped between -96.0 dB and 0.0 dB (defaults to -30.6 dB).
+/// - `pre_head` and `post_tail` (frames of padding) are clamped between 0 and 120.
+/// - `min_strip` (minimum silent frames to remove) is clamped between 1 and 300.
+pub fn detect_silence_ranges(
+    s: &Session,
+    id: ItemId,
+    bounds: Option<TimeRange>,
+    clips: Option<&[ClipId]>,
+    threshold_db: f32,
+    pre_head: usize,
+    post_tail: usize,
+    min_strip: usize,
+) -> Result<Vec<TimeRange>> {
+    let threshold_db = if threshold_db.is_finite() { threshold_db.clamp(-96.0, 0.0) } else { DEFAULT_SILENCE_THRESHOLD_DB };
+    let pre_head = pre_head.clamp(0, MAX_SILENCE_PAD_FRAMES);
+    let post_tail = post_tail.clamp(0, MAX_SILENCE_PAD_FRAMES);
+    let min_strip = min_strip.clamp(1, MAX_SILENCE_STRIP_FRAMES);
+
+    let seq = s.project.sequence(id).ok_or(EngineError::NoSequence)?;
+    let seq_duration = seq.duration();
+    if seq_duration <= Tick::ZERO {
+        return Ok(Vec::new());
+    }
+
+    let (start_tick, end_tick) = match bounds {
+        Some(b) => (b.start.max(Tick::ZERO), b.end().min(seq_duration)),
+        None => (Tick::ZERO, seq_duration),
+    };
+    if end_tick <= start_tick {
+        return Ok(Vec::new());
+    }
+
+    let mut clip_spans: Vec<TimeRange> = Vec::new();
+    if let Some(target_clips) = clips {
+        for &cid in target_clips {
+            if let Some((_, it)) = seq.find_item(cid) {
+                clip_spans.push(TimeRange::from_bounds(it.start, it.end()));
+            }
+        }
+    }
+
+    let fps = seq.settings.frame_rate;
+    let sr = seq.settings.sample_rate;
+    if sr == 0 || fps.num <= 0 || fps.den <= 0 {
+        return Ok(Vec::new());
+    }
+
+    let f_start = fps.frame_at(start_tick);
+    let f_end = fps.frame_at(end_tick);
+    let total_frames = (f_end - f_start).max(0) as usize;
+    if total_frames == 0 {
+        return Ok(Vec::new());
+    }
+    // Cap maximum frames processed in a single call to protect memory and responsiveness (~9 hours at 30 fps)
+    if total_frames > 1_000_000 {
+        return Err(EngineError::Other("range too large for silence detection".into()));
+    }
+
+    let provider = s.media.provider(s.project.clone(), s.services.clone());
+    let mut silent = vec![true; total_frames];
+
+    const CHUNK_FRAMES: usize = 120;
+    for chunk_idx in (0..total_frames).step_by(CHUNK_FRAMES) {
+        let n_frames = CHUNK_FRAMES.min(total_frames - chunk_idx);
+        let cf_start = f_start + chunk_idx as i64;
+        let cf_end = cf_start + n_frames as i64;
+        let t0 = fps.tick_of(cf_start);
+        let t1 = fps.tick_of(cf_end);
+        let s0 = t0.to_units_floor(i64::from(sr));
+        let s1 = t1.to_units_floor(i64::from(sr));
+        let chunk_samples = (s1 - s0).max(0) as usize;
+        if chunk_samples == 0 {
+            continue;
+        }
+        let buf = s.previews.mix(&s.project, id, s0, chunk_samples, &provider);
+        let ch = buf.channels.len().max(1);
+        for f in 0..n_frames {
+            let cur_frame = cf_start + f as i64;
+            let ft0 = fps.tick_of(cur_frame);
+            let ft1 = fps.tick_of(cur_frame + 1);
+            let frame_s0 = (ft0.to_units_floor(i64::from(sr)) - s0).max(0) as usize;
+            let frame_s1 = (ft1.to_units_floor(i64::from(sr)) - s0).min(chunk_samples as i64) as usize;
+            if frame_s1 <= frame_s0 {
+                continue;
+            }
+            let m = frame_s1 - frame_s0;
+            let mut sum_sq = 0.0f32;
+            for chan in &buf.channels {
+                if let Some(slice) = chan.get(frame_s0..frame_s1) {
+                    for &x in slice {
+                        sum_sq += x * x;
+                    }
+                }
+            }
+            let mean_sq = sum_sq / (m * ch) as f32;
+            let db = 10.0 * (mean_sq + 1e-12).log10();
+            silent[chunk_idx + f] = db < threshold_db;
+        }
+    }
+
+    let mut keep = vec![false; total_frames];
+    for i in 0..total_frames {
+        let frame_t = fps.tick_of(f_start + i as i64);
+        if !clip_spans.is_empty() && !clip_spans.iter().any(|r| r.contains(frame_t)) {
+            keep[i] = true;
+            continue;
+        }
+        if !silent[i] {
+            keep[i] = true;
+            let pre_start = i.saturating_sub(pre_head);
+            for j in pre_start..i {
+                keep[j] = true;
+            }
+            let post_end = i.saturating_add(post_tail).min(total_frames.saturating_sub(1));
+            for j in (i + 1)..=post_end {
+                keep[j] = true;
+            }
+        }
+    }
+
+    let mut ranges: Vec<TimeRange> = Vec::new();
+    let mut run_start: Option<usize> = None;
+    for i in 0..total_frames {
+        if !keep[i] {
+            if run_start.is_none() {
+                run_start = Some(i);
+            }
+        } else if let Some(start) = run_start.take() {
+            let run_len = i - start;
+            if run_len >= min_strip {
+                let t_start = fps.tick_of(f_start + start as i64);
+                let t_end = fps.tick_of(f_start + i as i64);
+                ranges.push(TimeRange::from_bounds(t_start, t_end));
+            }
+        }
+    }
+    if let Some(start) = run_start {
+        let run_len = total_frames - start;
+        if run_len >= min_strip {
+            let t_start = fps.tick_of(f_start + start as i64);
+            let t_end = fps.tick_of(f_start + total_frames as i64);
+            ranges.push(TimeRange::from_bounds(t_start, t_end));
+        }
+    }
+
+    Ok(ranges)
+}
+
+/// Remove Silence: detect audio below a threshold (dBFS) and ripple delete silence across the sequence.
+pub fn remove_silence(s: &mut Session, p: &Value) -> Result<Value> {
+    let id = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
+    let clips: Vec<ClipId> = p.get("clips").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_u64().map(ClipId)).collect()).unwrap_or_default();
+    let threshold_db = f64_p(p, "threshold").unwrap_or(DEFAULT_SILENCE_THRESHOLD_DB as f64) as f32;
+    let pre_head = u64_p(p, "preHead").unwrap_or(DEFAULT_SILENCE_PRE_HEAD_FRAMES as u64) as usize;
+    let post_tail = u64_p(p, "postTail").unwrap_or(DEFAULT_SILENCE_POST_TAIL_FRAMES as u64) as usize;
+    let min_strip = u64_p(p, "minStrip").unwrap_or(DEFAULT_SILENCE_MIN_STRIP_FRAMES as u64) as usize;
+
+    let ranges = detect_silence_ranges(s, id, None, if clips.is_empty() { None } else { Some(&clips) }, threshold_db, pre_head, post_tail, min_strip)?;
+
+    if ranges.is_empty() {
+        s.toast("No silence found matching the criteria");
+        return Ok(json!({"removed": 0, "ticks": 0, "seconds": 0.0}));
+    }
+
+    let n = ranges.len();
+    let total = s.edit_sequence("Remove Silence", |seq, ctx, _| Ok(filmcraft_edit::transcript::ripple_delete_ranges(seq, ranges, ctx)))?;
+
+    s.toast(format!("Removed {n} silences ({:.1}s)", total.0 as f64 / filmcraft_time::TICKS_PER_SECOND as f64));
+    Ok(json!({
+        "removed": n,
+        "ticks": total.0,
+        "seconds": total.0 as f64 / filmcraft_time::TICKS_PER_SECOND as f64
+    }))
 }

@@ -360,3 +360,19 @@
 	Next Appearance Mode	Следующий режим оформления
 	Project Notes	Заметки проекта
 
+# Sequence ▸ Remove Silence
+	Remove Silence…	Удалить тишину…
+	Remove Silence	Удалить тишину
+	Threshold:	Порог:
+	Pre head:	Начальный запас:
+	Post tail:	Конечный запас:
+	Minimum to strip:	Минимальная длина тишины:
+	Preview:	Предпросмотр:
+	Visible area	Видимая область
+	Entire clip	Весь клип
+	Entire sequence	Вся последовательность
+	{count} silences detected ({sec}s)	Обнаружено пауз: {count} ({sec} с)
+	Detecting silences…	Поиск пауз…
+	Remove	Удалить
+	No silence found matching the criteria	Тишина, соответствующая критериям, не найдена
+	Removed {count} silences ({sec}s)	Удалено пауз: {count} ({sec} с)
