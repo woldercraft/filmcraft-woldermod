@@ -196,6 +196,9 @@ impl filmcraft_matroska::ByteSource for Src {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
         self.0.read_at(offset, buf)
     }
+    fn as_sync(&self) -> Option<&(dyn filmcraft_matroska::ByteSource + Sync)> {
+        Some(self)
+    }
 }
 
 /// Convenience: an `Arc` media source from bytes (tries MP4/MOV then audio files).

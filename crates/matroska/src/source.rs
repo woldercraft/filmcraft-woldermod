@@ -16,6 +16,10 @@ pub trait ByteSource {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+    /// Concurrent reader handle when this source supports parallel positional reads.
+    fn as_sync(&self) -> Option<&(dyn ByteSource + Sync)> {
+        None
+    }
 }
 
 fn eof() -> io::Error {
@@ -42,6 +46,9 @@ impl ByteSource for Vec<u8> {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
         self.as_slice().read_at(offset, buf)
     }
+    fn as_sync(&self) -> Option<&(dyn ByteSource + Sync)> {
+        Some(self)
+    }
 }
 
 impl<T: ByteSource + ?Sized> ByteSource for &T {
@@ -50,6 +57,9 @@ impl<T: ByteSource + ?Sized> ByteSource for &T {
     }
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
         (**self).read_at(offset, buf)
+    }
+    fn as_sync(&self) -> Option<&(dyn ByteSource + Sync)> {
+        (**self).as_sync()
     }
 }
 
@@ -60,6 +70,9 @@ impl<T: ByteSource + ?Sized> ByteSource for Arc<T> {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
         (**self).read_at(offset, buf)
     }
+    fn as_sync(&self) -> Option<&(dyn ByteSource + Sync)> {
+        (**self).as_sync()
+    }
 }
 
 impl<T: ByteSource + ?Sized> ByteSource for Box<T> {
@@ -69,12 +82,18 @@ impl<T: ByteSource + ?Sized> ByteSource for Box<T> {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
         (**self).read_at(offset, buf)
     }
+    fn as_sync(&self) -> Option<&(dyn ByteSource + Sync)> {
+        (**self).as_sync()
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl ByteSource for std::fs::File {
     fn len(&self) -> u64 {
         self.metadata().map(|m| m.len()).unwrap_or(0)
+    }
+    fn as_sync(&self) -> Option<&(dyn ByteSource + Sync)> {
+        Some(self)
     }
     #[cfg(unix)]
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {

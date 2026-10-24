@@ -1690,7 +1690,12 @@ pub fn quick_export(app: &mut FilmcraftApp, ctx: &egui::Context, anchor: egui::P
         app.ui.export.quick_path = p;
     }
     if go {
-        let p = json!({"preset": app.ui.export.quick_preset, "path": app.ui.export.quick_path});
+        let p = json!({
+            "preset": app.ui.export.quick_preset,
+            "path": app.ui.export.quick_path,
+            "gpuRendering": "auto",
+            "hardwareEncoding": "auto",
+        });
         match app.session.execute("export.quick", p) {
             Ok(v) => app.ui.status = tlf!("Quick Export: {path}", path = v["path"].as_str().unwrap_or("")),
             Err(e) => app.ui.status = e.to_string(),

@@ -58,10 +58,11 @@ pub fn to_frame(src: &Biplanar, g: &Geometry) -> Result<VideoFrame, String> {
         }
         let (mut u, mut v) = (pool::take_u8(cw * ch), pool::take_u8(cw * ch));
         for y in 0..ch {
-            // two passes over the row: each is a simple strided copy the compiler vectorises
             let pairs = row(src.chroma, src.stride, coy + y, cox * 2, cw * 2)?.as_chunks::<2>().0;
-            u.extend(pairs.iter().map(|p| p[0]));
-            v.extend(pairs.iter().map(|p| p[1]));
+            for &[ub, vb] in pairs {
+                u.push(ub);
+                v.push(vb);
+            }
         }
         PixelData::Yuv8 { planes: [Arc::new(yp), Arc::new(u), Arc::new(v)], chroma: Chroma::C420, alpha: None }
     } else {
@@ -73,8 +74,10 @@ pub fn to_frame(src: &Biplanar, g: &Geometry) -> Result<VideoFrame, String> {
         let (mut u, mut v) = (pool::take_u16(cw * ch), pool::take_u16(cw * ch));
         for y in 0..ch {
             let quads = row(src.chroma, src.stride, coy + y, cox * 4, cw * 4)?.as_chunks::<4>().0;
-            u.extend(quads.iter().map(|q| u16::from_le_bytes([q[0], q[1]]) >> shift));
-            v.extend(quads.iter().map(|q| u16::from_le_bytes([q[2], q[3]]) >> shift));
+            for q in quads {
+                u.push(u16::from_le_bytes([q[0], q[1]]) >> shift);
+                v.push(u16::from_le_bytes([q[2], q[3]]) >> shift);
+            }
         }
         PixelData::Yuv16 { planes: [Arc::new(yp), Arc::new(u), Arc::new(v)], chroma: Chroma::C420, bits: g.bits, alpha: None }
     };

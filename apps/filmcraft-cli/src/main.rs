@@ -236,6 +236,18 @@ impl filmcraft_export::FrameRenderer for GpuFrameRenderer {
     ) -> Option<filmcraft_render::Image> {
         self.0.render(project, seq, t, opts, sources)
     }
+
+    fn supports_plan(&self) -> bool {
+        true
+    }
+
+    fn render_plan(&mut self, plan: &filmcraft_render::plan::FramePlan) -> Option<filmcraft_render::Image> {
+        self.0.render_plan(plan)
+    }
+
+    fn render_plan_rgba8(&mut self, plan: &filmcraft_render::plan::FramePlan) -> Option<(u32, u32, Vec<u8>)> {
+        self.0.render_plan_rgba8(plan)
+    }
 }
 
 fn register_gpu_frame_renderer() {

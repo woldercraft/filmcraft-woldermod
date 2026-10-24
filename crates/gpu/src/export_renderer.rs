@@ -11,11 +11,13 @@
 //! the CPU renderer; a `FramePlan::Image` plan (HDR / wide gamut / anything the plan sends to the
 //! CPU) is returned unchanged — it already is the CPU image.
 
-use crate::{GpuCompositor, prepare};
+use crate::{GpuCompositor, SharedUploads, prepare};
 use filmcraft_project::{ItemId, Project};
 use filmcraft_render::plan::{FramePlan, plan_frame};
 use filmcraft_render::{Image, RenderOptions, SourceProvider};
 use filmcraft_time::Tick;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}};
 
 /// Where export rendering spends its time (process-wide totals, for the bench).
 pub mod timing {
@@ -88,60 +90,110 @@ fn device_failed() -> bool {
     DEVICE_FAILED.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+struct SharedExportState {
+    instance: wgpu::Instance,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    uploads: SharedUploads,
+    idle_compositors: Mutex<Vec<GpuCompositor>>,
+    active_renderers: AtomicUsize,
+}
+
+fn shared_state() -> Option<&'static SharedExportState> {
+    static SHARED: std::sync::OnceLock<Option<SharedExportState>> = std::sync::OnceLock::new();
+    SHARED
+        .get_or_init(|| {
+            if wgpu::Instance::enabled_backend_features().is_empty() {
+                return None;
+            }
+            let instance = wgpu::Instance::default();
+            let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
+            let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
+            device.on_uncaptured_error(Arc::new(|e: wgpu::Error| mark_device_failed(&format!("GPU error: {e}"))));
+            device.set_device_lost_callback(|reason, msg| mark_device_failed(&format!("GPU device lost ({reason:?}): {msg}")));
+            Some(SharedExportState {
+                instance,
+                device,
+                queue,
+                uploads: Arc::new(Mutex::new((0, HashMap::new()))),
+                idle_compositors: Mutex::new(Vec::new()),
+                active_renderers: AtomicUsize::new(0),
+            })
+        })
+        .as_ref()
+}
+
 pub struct ExportRenderer {
     _instance: wgpu::Instance,
     #[expect(dead_code, reason = "kept for future frame-accuracy flows (readback fences)")]
     device: wgpu::Device,
     #[expect(dead_code, reason = "kept for future frame-accuracy flows (readback fences)")]
     queue: wgpu::Queue,
-    compositor: GpuCompositor,
+    compositor: Option<GpuCompositor>,
+}
+
+impl Drop for ExportRenderer {
+    fn drop(&mut self) {
+        let Some(mut comp) = self.compositor.take() else { return };
+        comp.clear_uploads();
+        if let Some(st) = shared_state() {
+            if st.active_renderers.fetch_sub(1, Ordering::Relaxed) == 1
+                && let Ok(mut up) = st.uploads.lock()
+            {
+                up.1.clear();
+            }
+            if !device_failed()
+                && let Ok(mut idle) = st.idle_compositors.lock()
+                && idle.len() < 16
+            {
+                idle.push(comp);
+            }
+        }
+    }
 }
 
 impl ExportRenderer {
     /// The off-screen device, or `None` when this host has no usable adapter or this build no
     /// wgpu backend.
     pub fn new() -> Option<Self> {
-        // `None` is kept too: a machine without an adapter does not search again on every export
-        static SHARED: std::sync::OnceLock<Option<(wgpu::Instance, wgpu::Device, wgpu::Queue)>> = std::sync::OnceLock::new();
-        let (instance, device, queue) = SHARED
-            .get_or_init(|| {
-                // A build without a wgpu backend for this platform (`cargo build -p filmcraft-cli`
-                // alone: this crate asks for none) has no GPU to offer, and `Instance::default()`
-                // panics there.
-                if wgpu::Instance::enabled_backend_features().is_empty() {
-                    return None;
-                }
-                let instance = wgpu::Instance::default();
-                let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
-                let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
-                // wgpu's default handler panics on a validation or out-of-memory error; log it and
-                // send the remaining frames to the CPU instead.
-                device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| mark_device_failed(&format!("GPU error: {e}"))));
-                device.set_device_lost_callback(|reason, msg| mark_device_failed(&format!("GPU device lost ({reason:?}): {msg}")));
-                Some((instance, device, queue))
-            })
-            .as_ref()?
-            .clone();
+        let st = shared_state()?;
         if device_failed() {
             return None;
         }
-        let compositor = GpuCompositor::new(&device, &queue);
-        Some(Self { _instance: instance, device, queue, compositor })
+        st.active_renderers.fetch_add(1, Ordering::Relaxed);
+        let compositor = st
+            .idle_compositors
+            .lock()
+            .ok()
+            .and_then(|mut idle| idle.pop())
+            .unwrap_or_else(|| GpuCompositor::new(&st.device, &st.queue).with_shared_uploads(st.uploads.clone()));
+        Some(Self {
+            _instance: st.instance.clone(),
+            device: st.device.clone(),
+            queue: st.queue.clone(),
+            compositor: Some(compositor),
+        })
     }
 
     /// One frame as `render_sequence` would return it (premultiplied linear-light RGBA at the
     /// render size), or `None` when this frame must go to the CPU renderer.
     pub fn render(&mut self, project: &Project, seq: ItemId, t: Tick, opts: RenderOptions, sources: &dyn SourceProvider) -> Option<Image> {
         let plan = plan_frame(project, seq, t, opts, sources);
-        match &plan {
+        self.render_plan(&plan)
+    }
+
+    /// Composite a pre-built [`FramePlan`] (decoded and planned outside the renderer lock) into a
+    /// premultiplied linear-light [`Image`].
+    pub fn render_plan(&mut self, plan: &FramePlan) -> Option<Image> {
+        match plan {
             // Already the CPU image: return it unchanged instead of rendering it twice.
             FramePlan::Image(img) => Some(img.clone()),
             FramePlan::Layers { .. } => {
                 if device_failed() {
                     return None;
                 }
-                let prep = prepare(&plan);
-                let (w, h, px) = self.compositor.render_export_prepared(&plan, Some(&prep))?;
+                let prep = prepare(plan);
+                let (w, h, px) = self.compositor.as_mut()?.render_export_prepared(plan, Some(&prep))?;
                 // an error reported while this frame was drawn leaves its pixels untrusted
                 if device_failed() {
                     return None;
@@ -150,6 +202,27 @@ impl ExportRenderer {
                 Some(Image { w: w as usize, h: h as usize, px })
             }
             // Transitions: the export path leaves them to the CPU reference renderer.
+            FramePlan::Composite { .. } => None,
+        }
+    }
+
+    /// Composite a pre-built [`FramePlan`] and resolve it over black to sRGB RGBA8 on the GPU
+    /// (cutting PCIe readback in half and skipping CPU float-to-sRGB conversion).
+    pub fn render_plan_rgba8(&mut self, plan: &FramePlan) -> Option<(u32, u32, Vec<u8>)> {
+        match plan {
+            FramePlan::Image(img) => Some((img.w as u32, img.h as u32, img.over_black_rgba8())),
+            FramePlan::Layers { .. } => {
+                if device_failed() {
+                    return None;
+                }
+                let prep = prepare(plan);
+                let (w, h, rgba) = self.compositor.as_mut()?.render_export_rgba8_prepared(plan, Some(&prep))?;
+                if device_failed() {
+                    return None;
+                }
+                timing::add_frame();
+                Some((w, h, rgba))
+            }
             FramePlan::Composite { .. } => None,
         }
     }

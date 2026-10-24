@@ -85,6 +85,9 @@ impl FilePool {
     /// The open file of reader `id`, now the most recently used.
     fn get(&self, id: u64) -> Option<Arc<std::fs::File>> {
         let mut s = self.state();
+        if let Some((_, file)) = s.open.back().filter(|(i, _)| *i == id) {
+            return Some(file.clone());
+        }
         let at = s.open.iter().position(|(i, _)| *i == id)?;
         let entry = s.open.remove(at)?;
         let file = entry.1.clone();

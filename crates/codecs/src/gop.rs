@@ -135,8 +135,18 @@ fn decode_start(s: &dyn VideoSamples, i: usize) -> usize {
     key
 }
 
+struct Runner {
+    decoder: Box<dyn VideoDecoder>,
+    next: usize,
+    start: usize,
+    out_max: i64,
+}
+
 struct State {
     decoder: Option<Box<dyn VideoDecoder>>,
+    /// Secondary running decoders at other GOP positions when concurrent requests or multi-cut
+    /// composites access different regions of the same source simultaneously.
+    runners: Vec<Runner>,
     /// The decoder only produces intra pictures: frames decode independently and in parallel.
     intra: bool,
     /// Idle decoders for parallel intra decoding.
@@ -171,6 +181,10 @@ impl State {
         if let Some(d) = self.decoder.take() {
             pool.decoders.fetch_sub(1, Ordering::Relaxed);
             out.push(d);
+        }
+        for r in self.runners.drain(..) {
+            pool.decoders.fetch_sub(1, Ordering::Relaxed);
+            out.push(r.decoder);
         }
         self.next = usize::MAX;
         out
@@ -279,6 +293,7 @@ struct Pool {
 struct Shared {
     state: Mutex<State>,
     pool: Arc<Pool>,
+    waiters: AtomicUsize,
 }
 
 impl Drop for Shared {
@@ -504,6 +519,7 @@ impl GopCache {
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 decoder: None,
+                runners: Vec::new(),
                 intra: false,
                 spare: Vec::new(),
                 next: usize::MAX,
@@ -517,6 +533,7 @@ impl GopCache {
                 background: false,
             }),
             pool: pool.clone(),
+            waiters: AtomicUsize::new(0),
         });
         pool.register(&shared);
         Self { shared, explicit_color, rotation: 0, crop: None, budget: 384 << 20 }
@@ -646,12 +663,21 @@ impl GopCache {
             return self.private_frame(s, i, want_pts, n);
         }
         let draft = filmcraft_media::cancel::draft();
+        struct WaiterGuard<'a>(&'a AtomicUsize);
+        impl Drop for WaiterGuard<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+        self.shared.waiters.fetch_add(1, Ordering::Relaxed);
+        let _waiter = WaiterGuard(&self.shared.waiters);
         // Idle caches' decoders released below. Declared before the lock guard, so it is dropped
         // after the guard on every return path: dropping a decoder can block (a hardware session
         // waits for its frames in flight) and must not hold this cache's lock.
         let mut released: Vec<Box<dyn VideoDecoder>> = Vec::new();
         let mut st = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
         let _decoding = DecodingGuard::enter(me);
+        let active_recently = st.last_used.elapsed() < self.shared.pool.recent;
         st.last_used = Instant::now();
         st.pin = want_pts;
         let background = filmcraft_media::cancel::background();
@@ -687,12 +713,14 @@ impl GopCache {
         if st.intra {
             return self.intra_frame(st, s, i, want_pts);
         }
+        let keep_runners = !cfg!(test) && !background && (active_recently || self.shared.waiters.load(Ordering::Relaxed) > 1);
         // with the lock held: see `isolated`
         let st = &mut *st;
-        isolated(|| self.decode_until(st, s, i, want_pts, late_before, draft))
+        isolated(|| self.decode_until(st, s, i, want_pts, late_before, draft, keep_runners))
     }
 
     /// Decode (the lock held) until the frame with `want_pts` (sample `i`) is cached; return it.
+    #[allow(clippy::too_many_arguments)]
     fn decode_until(
         &self,
         st: &mut State,
@@ -701,6 +729,7 @@ impl GopCache {
         want_pts: i64,
         late_before: Option<i64>,
         draft: bool,
+        keep_runners: bool,
     ) -> crate::Result<Arc<VideoFrame>> {
         let n = s.count();
         let mut key = decode_start(s, i);
@@ -709,13 +738,68 @@ impl GopCache {
         // (a frame-threaded decoder holds many pictures in flight). Otherwise the frame was
         // evicted or lies in another GOP: restart at the sync sample. A run that started after
         // `key` (at the random-access picture of a wanted leading picture) left the picture out.
-        let running = st.next != usize::MAX && st.next <= n && st.start <= key;
-        // Decoding on through a short stretch into the next GOP is cheaper than a restart, and
-        // playback wants those frames anyway.
-        let near = st.next <= key && key - st.next <= CONTINUE_THROUGH;
-        let continuing = running && (st.next > key || near) && (i >= st.next || (st.start <= i && want_pts > st.out_max));
+        let can_continue = |next: usize, start: usize, out_max: i64| -> bool {
+            let running = next != usize::MAX && next <= n && start <= key;
+            // Decoding on through a short stretch into the next GOP is cheaper than a restart, and
+            // playback wants those frames anyway.
+            let near = next <= key && key - next <= CONTINUE_THROUGH;
+            running && (next > key || near) && (i >= next || (start <= i && want_pts > out_max))
+        };
+        let mut continuing = can_continue(st.next, st.start, st.out_max);
+        if !continuing
+            && let Some(idx) = st.runners.iter().position(|r| can_continue(r.next, r.start, r.out_max))
+            && let Some(prev_dec) = st.decoder.take()
+        {
+            let chosen = st.runners.remove(idx);
+            st.runners.push(Runner {
+                decoder: prev_dec,
+                next: st.next,
+                start: st.start,
+                out_max: st.out_max,
+            });
+            st.decoder = Some(chosen.decoder);
+            st.next = chosen.next;
+            st.start = chosen.start;
+            st.out_max = chosen.out_max;
+            continuing = true;
+        }
         if !continuing {
             SEEKS.fetch_add(1, Ordering::Relaxed);
+            if keep_runners && st.next != usize::MAX && st.next <= n {
+                if let Some(idle_idx) = st.runners.iter().position(|r| r.next == usize::MAX || r.next > n) {
+                    if let Some(prev_dec) = st.decoder.take() {
+                        let idle = st.runners.remove(idle_idx);
+                        st.runners.push(Runner {
+                            decoder: prev_dec,
+                            next: st.next,
+                            start: st.start,
+                            out_max: st.out_max,
+                        });
+                        st.decoder = Some(idle.decoder);
+                    }
+                } else if st.runners.len() < 2 {
+                    if let Ok(new_dec) = s.make_decoder()
+                        && let Some(prev_dec) = st.decoder.replace(new_dec)
+                    {
+                        self.shared.pool.decoders.fetch_add(1, Ordering::Relaxed);
+                        st.runners.push(Runner {
+                            decoder: prev_dec,
+                            next: st.next,
+                            start: st.start,
+                            out_max: st.out_max,
+                        });
+                    }
+                } else if let Some(prev_dec) = st.decoder.take() {
+                    let evicted = st.runners.remove(0);
+                    st.runners.push(Runner {
+                        decoder: prev_dec,
+                        next: st.next,
+                        start: st.start,
+                        out_max: st.out_max,
+                    });
+                    st.decoder = Some(evicted.decoder);
+                }
+            }
             // The container's sync flags may be wrong for the codec (an MP4 without `stss` marks
             // every sample): step back to a sample the decoder can start from.
             while key > 0 {

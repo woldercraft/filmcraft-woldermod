@@ -188,6 +188,31 @@ impl<'a, S: ByteSource + ?Sized> Io<'a, S> {
         Ok(&self.cache.buf[o..o + (want_end - pos) as usize])
     }
 
+    /// Element header at `pos` read directly without refilling the 64 KiB window.
+    fn header_direct(&self, pos: u64, limit: u64) -> Result<Option<Hdr>> {
+        if pos >= limit || pos >= self.len {
+            return Ok(None);
+        }
+        let c = &*self.cache;
+        let mut stack = [0u8; 12];
+        let b: &[u8] = if pos >= c.start && pos.saturating_add(12).min(self.len) <= c.start + c.buf.len() as u64 {
+            let o = (pos - c.start) as usize;
+            let end = (pos.saturating_add(12).min(self.len) - c.start) as usize;
+            &c.buf[o..end]
+        } else {
+            let fill = ((self.len - pos) as usize).min(12);
+            self.src.read_at(pos, &mut stack[..fill])?;
+            &stack[..fill]
+        };
+        let Some((id, il)) = read_id(b) else { return Ok(None) };
+        let Some((size, sl)) = read_size(&b[il..]) else { return Ok(None) };
+        let hlen = il + sl;
+        if pos + hlen as u64 > limit {
+            return Ok(None);
+        }
+        Ok(Some(Hdr { id, pos, size, hlen }))
+    }
+
     /// Exactly `n` bytes at `pos`.
     fn read_vec(&mut self, pos: u64, n: u64) -> Result<Vec<u8>> {
         if pos.checked_add(n).is_none_or(|e| e > self.len) {
@@ -289,13 +314,28 @@ impl<'a, S: ByteSource + ?Sized> Io<'a, S> {
 // ---------------------------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
+enum BlockFrames {
+    Single((u64, u32)),
+    Laced(Vec<(u64, u32)>),
+}
+
+impl BlockFrames {
+    fn as_slice(&self) -> &[(u64, u32)] {
+        match self {
+            Self::Single(pair) => std::slice::from_ref(pair),
+            Self::Laced(v) => v.as_slice(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 struct BlockRef {
     track: usize,
     block_offset: u64,
     /// Timestamp in ticks (cluster + relative).
     ts: i64,
     /// Absolute (offset, size) of each frame.
-    frames: Vec<(u64, u32)>,
+    frames: BlockFrames,
     block_duration: Option<u64>,
     keyframe: bool,
     discardable: bool,
@@ -335,7 +375,7 @@ fn parse_block<S: ByteSource + ?Sized>(
     data_start: u64,
     len: u64,
     lookup: &dyn Fn(u64) -> Option<usize>,
-) -> Result<Option<(usize, i16, u8, Vec<(u64, u32)>)>> {
+) -> Result<Option<(usize, i16, u8, BlockFrames)>> {
     let head = io.peek(data_start, 16.min(len as usize))?;
     let Some((tn, tl, _)) = ebml::read_vint(head) else { return Ok(None) };
     if head.len() < tl + 3 {
@@ -347,11 +387,11 @@ fn parse_block<S: ByteSource + ?Sized>(
     let hdr = (tl + 3) as u64;
     let lacing = Lacing::from_flags(flags);
     let frames = if lacing == Lacing::None {
-        vec![(data_start + hdr, (len - hdr) as u32)]
+        BlockFrames::Single((data_start + hdr, (len - hdr) as u32))
     } else {
         let body = io.read_vec(data_start + hdr, len - hdr)?;
         match parse_lacing(lacing, &body) {
-            Ok(f) => f.into_iter().map(|(o, l)| (data_start + hdr + o as u64, l as u32)).collect(),
+            Ok(f) => BlockFrames::Laced(f.into_iter().map(|(o, l)| (data_start + hdr + o as u64, l as u32)).collect()),
             Err(_) => return Ok(None),
         }
     };
@@ -432,7 +472,7 @@ fn parse_block_elem<S: ByteSource + ?Sized>(
             }
             let Some((track, rel, flags, frames)) = block else { return Ok(None) };
             // with lacing, an addition belongs to the block, not to one of its frames
-            let addition = addition.filter(|_| frames.len() == 1);
+            let addition = addition.filter(|_| frames.as_slice().len() == 1);
             Ok(Some(BlockRef {
                 track,
                 block_offset: h.pos,
@@ -452,7 +492,8 @@ fn parse_block_elem<S: ByteSource + ?Sized>(
 
 /// Expand a block into frames with per-lace timestamps.
 fn expand(b: &BlockRef, t: &Track, scale: u64, skip: u16, out: &mut impl Extend<FrameRef>) {
-    let n = b.frames.len() as u64;
+    let slice = b.frames.as_slice();
+    let n = slice.len() as u64;
     // total block duration in ns
     let block_ns: Option<u128> = match (b.block_duration, t.default_duration_ns) {
         (Some(d), _) => Some(d as u128 * scale as u128),
@@ -467,7 +508,7 @@ fn expand(b: &BlockRef, t: &Track, scale: u64, skip: u16, out: &mut impl Extend<
     let delay_ns = t.codec_delay_ns as i128;
     let delay_ticks = to_ticks(delay_ns);
     let base_ns = b.ts as i128 * scale_i;
-    out.extend(b.frames.iter().enumerate().skip(skip as usize).map(|(i, &(offset, size))| {
+    out.extend(slice.iter().enumerate().skip(skip as usize).map(|(i, &(offset, size))| {
         let (start, end) = match block_ns {
             Some(total) => ((total * i as u128 / n as u128) as i128, Some((total * (i as u128 + 1) / n as u128) as i128)),
             None => (0, None),
@@ -657,6 +698,70 @@ impl Walker<'_> {
                         self.follow_seek_head(io, file, &[INFO, TRACKS])?;
                         if !self.opts.index {
                             break;
+                        }
+                    }
+                    if !cfg!(target_arch = "wasm32")
+                        && !self.opts.verify_crc
+                        && h.size != Size::Unknown
+                        && !h.overruns(seg_end)
+                        && let Some(sync_src) = io.src.as_sync()
+                    {
+                        let mut batch = vec![h];
+                        let mut next_pos = h.end(seg_end);
+                        while next_pos < seg_end {
+                            let Ok(Some(nh)) = io.header_direct(next_pos, seg_end) else { break };
+                            if nh.id == CLUSTER && nh.size != Size::Unknown && !nh.overruns(seg_end) && nh.end(seg_end) > next_pos {
+                                next_pos = nh.end(seg_end);
+                                batch.push(nh);
+                            } else {
+                                break;
+                            }
+                        }
+                        if batch.len() >= 8 {
+                            let tracks = &file.tracks;
+                            let n_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8).min(batch.len());
+                            let chunk_len = batch.len().div_ceil(n_threads);
+                            let results: Vec<Result<Vec<(Hdr, ClusterInfo, Vec<BlockRef>, Vec<String>)>>> = std::thread::scope(|s| {
+                                let handles: Vec<_> = batch
+                                    .chunks(chunk_len)
+                                    .map(|chunk| {
+                                        s.spawn(move || {
+                                            let mut t_cache = Cache::default();
+                                            let mut t_io = Io::new(sync_src, &mut t_cache);
+                                            let mut out = Vec::with_capacity(chunk.len());
+                                            for ch in chunk {
+                                                let mut w = Vec::new();
+                                                let (ci, blocks) = scan_cluster(&mut t_io, ch, seg_end, tracks, &mut w)?;
+                                                out.push((*ch, ci, blocks, w));
+                                            }
+                                            Ok(out)
+                                        })
+                                    })
+                                    .collect();
+                                handles
+                                    .into_iter()
+                                    .map(|jh| {
+                                        jh.join()
+                                            .unwrap_or_else(|_| Err(Error::Io(std::io::Error::other("cluster scanner thread panicked"))))
+                                    })
+                                    .collect()
+                            });
+                            let mut resume_at = next_pos;
+                            'apply: for group in results {
+                                for (ch, ci, blocks, w) in group? {
+                                    if !w.is_empty() || ci.end != ch.end(seg_end) {
+                                        resume_at = ch.pos;
+                                        break 'apply;
+                                    }
+                                    add_blocks(file, file.clusters.len() as u32, &blocks);
+                                    self.blocks_seen = true;
+                                    file.clusters.push(ci);
+                                }
+                            }
+                            if resume_at > h.pos {
+                                pos = resume_at;
+                                continue;
+                            }
                         }
                     }
                     let (ci, blocks) = scan_cluster(io, &h, seg_end, &file.tracks, &mut file.warnings)?;

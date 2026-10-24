@@ -54,6 +54,8 @@ impl Geometry {
 struct RendererPool {
     /// Initial capacity, also the maximum number of frame tasks admitted at once.
     capacity: usize,
+    /// Whether the pooled renderers accept a pre-planned [`filmcraft_render::plan::FramePlan`].
+    supports_plan: bool,
     renderers: std::sync::Mutex<Vec<Box<dyn FrameRenderer>>>,
     available: std::sync::Condvar,
     /// A renderer panicked: the pool is retired and the rest of the export renders on the CPU.
@@ -63,8 +65,10 @@ struct RendererPool {
 impl RendererPool {
     /// `None` for an empty list (a pool nobody could take from).
     fn new(renderers: Vec<Box<dyn FrameRenderer>>) -> Option<Self> {
+        let supports_plan = renderers.first().is_some_and(|r| r.supports_plan());
         (!renderers.is_empty()).then(|| Self {
             capacity: renderers.len(),
+            supports_plan,
             renderers: std::sync::Mutex::new(renderers),
             available: std::sync::Condvar::new(),
             failed: std::sync::atomic::AtomicBool::new(false),
@@ -190,9 +194,9 @@ impl Pipeline {
         let renderer = if settings.gpu_rendering == GpuRendering::Off {
             None
         } else {
-            // Up to eight GPU renderers in the pool so larger batches stay in flight and saturate
-            // hardware encoding without idling between read-backs.
-            let count = rayon::current_num_threads().clamp(4, 8);
+            // Up to 16 GPU renderers in the pool (one per Rayon thread) so larger batches stay in
+            // flight and saturate the GPU and hardware encoder without idling between read-backs.
+            let count = rayon::current_num_threads().clamp(4, 16);
             let mut list = Vec::with_capacity(count);
             for _ in 0..count {
                 if let Some(r) = build_frame_renderer() {
@@ -224,10 +228,24 @@ impl Pipeline {
         })
     }
 
+    /// Whether the export needs no CPU post-processing between the composited linear accumulator
+    /// and the final sRGB over-black RGBA8 output (so the GPU can resolve directly to `Rgba8Unorm`).
+    fn can_direct_rgba8(&self) -> bool {
+        let fx = &self.effects;
+        !self.hdr_out
+            && !self.alpha
+            && self.geom.offset == (0, 0)
+            && self.geom.content.is_none_or(|(cw, ch)| (cw, ch) == (self.w as usize, self.h as usize))
+            && self.overlay.is_none()
+            && !(fx.name_overlay.enabled && !fx.name_overlay.text.trim().is_empty())
+            && !fx.timecode_overlay.enabled
+    }
+
     /// Output frame `f` as straight sRGB RGBA8 at the output size, or for HDR exports the encoded
     /// R'G'B' floats (3 per pixel).
     pub fn frame(&self, f: i64, sources: &dyn SourceProvider) -> (Vec<u8>, Vec<f32>) {
         let t = self.rate.tick_of(f);
+        let lim = &self.effects.video_limiter;
         // The registered GPU renderer goes first; `None` (no adapter, a plan the GPU cannot
         // draw, any internal error) falls back to the CPU reference renderer below. A frame the
         // planner hands back as one CPU image anyway (an adjustment layer, a complex transition,
@@ -235,6 +253,39 @@ impl Pipeline {
         // many frames at a time as there are renderers instead of one per export thread.
         let pool = self.renderer.as_ref().filter(|_| !filmcraft_render::plan::is_cpu_frame(&self.project, self.seq, t));
         let gpu = match pool {
+            Some(pool) if pool.supports_plan => {
+                // Decode and plan the frame BEFORE acquiring a GPU renderer from the pool so
+                // renderers never sit idle while a worker thread waits on media decoding.
+                let plan = filmcraft_render::plan::plan_frame(&self.project, self.seq, t, self.opts, sources);
+                match &plan {
+                    filmcraft_render::plan::FramePlan::Image(img) => Some(img.clone()),
+                    filmcraft_render::plan::FramePlan::Composite { .. } => None,
+                    filmcraft_render::plan::FramePlan::Layers { width, height, .. } => {
+                        if self.can_direct_rgba8() && (*width, *height) == (self.w as usize, self.h as usize) {
+                            let asked = web_time::Instant::now();
+                            let direct = pool
+                                .with(|r| {
+                                    crate::note_lock_wait(asked.elapsed());
+                                    r.render_plan_rgba8(&plan)
+                                })
+                                .flatten();
+                            if let Some((_, _, mut rgba)) = direct {
+                                note_gpu_frame();
+                                if lim.enabled {
+                                    limit_rgba8(&mut rgba, lim.min_percent, lim.max_percent);
+                                }
+                                return (rgba, Vec::new());
+                            }
+                        }
+                        let asked = web_time::Instant::now();
+                        pool.with(|r| {
+                            crate::note_lock_wait(asked.elapsed());
+                            r.render_plan(&plan)
+                        })
+                        .flatten()
+                    }
+                }
+            }
             Some(pool) => {
                 let asked = web_time::Instant::now();
                 pool.with(|r| {
