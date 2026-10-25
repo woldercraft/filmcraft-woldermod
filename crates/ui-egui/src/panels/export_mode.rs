@@ -1056,6 +1056,15 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
             s.gpu_rendering = if on { GpuRendering::Auto } else { GpuRendering::Off };
         }
     });
+    // Where RGB becomes the encoder's YUV: Auto converts on the GPU when the encoder takes NV12
+    // (the fastest route, a third of the read-back); CPU keeps the RGBA read-back and conversion.
+    row(ui, t, "Color conversion", |ui| {
+        let opts = [("Auto (fastest: GPU when possible)".to_string(), true), ("CPU (RGBA read-back)".to_string(), true)];
+        let cur = if s.color_conversion == filmcraft_export::ColorConversion::Auto { &opts[0].0 } else { &opts[1].0 };
+        if let Some(i) = combo(ui, reg, "export.video.colorConversion", cur, &opts, 230.0) {
+            s.color_conversion = if i == 0 { filmcraft_export::ColorConversion::Auto } else { filmcraft_export::ColorConversion::Cpu };
+        }
+    });
     row(ui, t, "", |ui| {
         let g_label = gpu_short.unwrap_or("GPU");
         let (msg, col) = if s.gpu_rendering == GpuRendering::Auto {

@@ -140,6 +140,9 @@ pub(crate) struct Pipeline {
     /// Free the pool's float images when the export ends: a standalone export, not one part of a
     /// batch (`ExportSettings::part_of_batch`).
     trim_pool: bool,
+    /// Frames may leave as ready NV12 (`w * h * 3 / 2` bytes) instead of RGBA8: the encoder takes
+    /// it and Color conversion is Auto ([`Pipeline::set_nv12`]).
+    nv12: std::sync::atomic::AtomicBool,
 }
 
 impl Drop for Pipeline {
@@ -213,6 +216,7 @@ impl Pipeline {
             start_tc: q.start_timecode,
             drop_frame: q.settings.drop_frame,
             trim_pool: !settings.part_of_batch,
+            nv12: std::sync::atomic::AtomicBool::new(false),
             project: project.clone(),
             seq,
             rate: r.rate,
@@ -226,6 +230,13 @@ impl Pipeline {
             effects,
             overlay,
         })
+    }
+
+    /// Let eligible frames leave the GPU already converted to NV12 (`on`), for an encoder that
+    /// takes it. Frames the GPU cannot convert still come out as RGBA8; the encoder tells the
+    /// two apart by length.
+    pub(crate) fn set_nv12(&self, on: bool) {
+        self.nv12.store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Whether the export needs no CPU post-processing between the composited linear accumulator
@@ -262,6 +273,21 @@ impl Pipeline {
                     filmcraft_render::plan::FramePlan::Composite { .. } => None,
                     filmcraft_render::plan::FramePlan::Layers { width, height, .. } => {
                         if self.can_direct_rgba8() && (*width, *height) == (self.w as usize, self.h as usize) {
+                            // GPU colour conversion: only the NV12 picture comes back (the limiter
+                            // works on RGBA, so it keeps the RGBA route)
+                            if self.nv12.load(std::sync::atomic::Ordering::Relaxed) && !lim.enabled {
+                                let asked = web_time::Instant::now();
+                                let nv12 = pool
+                                    .with(|r| {
+                                        crate::note_lock_wait(asked.elapsed());
+                                        r.render_plan_nv12(&plan)
+                                    })
+                                    .flatten();
+                                if let Some((_, _, nv12)) = nv12 {
+                                    note_gpu_frame();
+                                    return (nv12, Vec::new());
+                                }
+                            }
                             let asked = web_time::Instant::now();
                             let direct = pool
                                 .with(|r| {

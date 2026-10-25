@@ -353,17 +353,23 @@ impl VaapiEncoder {
             .name("vaapi-encode-writer".into())
             .spawn(move || {
                 // RGBA -> NV12 happens here, off the exporting thread, so rendering the next batch
-                // and converting this one overlap instead of queueing behind each other.
+                // and converting this one overlap instead of queueing behind each other. A picture
+                // that already is NV12 (the GPU converted it) goes straight to the encoder.
+                let nv12_len = cw.saturating_mul(ch).saturating_mul(3) / 2;
                 let mut nv12: Vec<u8> = Vec::new();
-                while let Ok(rgba) = write_rx.recv() {
-                    filmcraft_export::timed(filmcraft_export::Stage::Convert, || {
-                        rgba_to_nv12_bt709(&rgba, cw, ch, &mut nv12);
-                    });
-                    let _ = free_tx.send(rgba);
-                    if let Err(e) = stdin.write_all(&nv12) {
+                while let Ok(pic) = write_rx.recv() {
+                    let ready = pic.len() == nv12_len;
+                    if !ready {
+                        filmcraft_export::timed(filmcraft_export::Stage::Convert, || {
+                            rgba_to_nv12_bt709(&pic, cw, ch, &mut nv12);
+                        });
+                    }
+                    let out: &[u8] = if ready { &pic } else { &nv12 };
+                    if let Err(e) = stdin.write_all(out) {
                         drop(stdin);
                         return Err(format!("VA-API write failed: {e}"));
                     }
+                    let _ = free_tx.send(pic);
                 }
                 let res = stdin.flush().map_err(|e| format!("VA-API flush failed: {e}"));
                 drop(stdin);
@@ -479,6 +485,10 @@ impl VideoEncoder for VaapiEncoder {
         u32::try_from(self.rate.num).unwrap_or(u32::MAX)
     }
 
+    fn accepts_nv12(&self) -> bool {
+        true
+    }
+
     fn encode(&mut self, f: &EncoderFrame) -> Result<Vec<EncodedPacket>> {
         if f.width != self.cfg.width || f.height != self.cfg.height {
             return Err(ExportError::Encode(format!(
@@ -489,8 +499,13 @@ impl VideoEncoder for VaapiEncoder {
         if f.hdr.is_some() {
             return Err(ExportError::Unsupported("VA-API 8-bit encoder does not take HDR pictures".into()));
         }
-        let expected = (self.cfg.width as usize).saturating_mul(self.cfg.height as usize).saturating_mul(4);
-        let rgba = f.rgba.get(..expected).ok_or_else(|| ExportError::Encode("VA-API: RGBA picture smaller than frame size".into()))?;
+        let pixels = (self.cfg.width as usize).saturating_mul(self.cfg.height as usize);
+        // a ready NV12 picture (3 bytes per 2 pixels) or RGBA8 (4 bytes per pixel)
+        let rgba = if f.rgba.len() == pixels.saturating_mul(3) / 2 {
+            f.rgba
+        } else {
+            f.rgba.get(..pixels.saturating_mul(4)).ok_or_else(|| ExportError::Encode("VA-API: RGBA picture smaller than frame size".into()))?
+        };
         let mut nv12 = self.free_rx.try_recv().unwrap_or_default();
         nv12.clear();
         nv12.extend_from_slice(rgba);

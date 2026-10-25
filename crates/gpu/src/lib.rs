@@ -43,6 +43,7 @@ pub mod export_renderer;
 pub mod fx;
 pub mod lut;
 pub mod mask;
+mod nv12;
 mod transition;
 pub use export_renderer::ExportRenderer;
 pub use lut::GpuLut;
@@ -93,6 +94,9 @@ pub struct GpuCompositor {
     /// with effects are then rendered on the CPU here).
     fx: Option<fx::FxStage>,
     transition: transition::PushStage,
+    /// GPU RGBA8 -> NV12 stage, created on first use (None until then or when the device rejects it).
+    nv12: Option<nv12::Nv12Stage>,
+    nv12_unavailable: bool,
     transition_inputs: [Option<(wgpu::Texture, wgpu::TextureView, (u32, u32))>; 2],
     pub gpu_transitions: u64,
     pub cpu_transitions: u64,
@@ -434,6 +438,8 @@ impl GpuCompositor {
             dummy,
             fx,
             transition: transition::PushStage::new(device),
+            nv12: None,
+            nv12_unavailable: false,
             transition_inputs: [None, None],
             gpu_transitions: 0,
             cpu_transitions: 0,
@@ -1064,6 +1070,42 @@ impl GpuCompositor {
         let sub = self.queue.submit([enc.finish()]);
         export_renderer::timing::add_submit(t.elapsed());
         self.map_output_staging(size, Some(sub))
+    }
+
+    /// Like [`render_export_rgba8_prepared`](Self::render_export_rgba8_prepared), but the picture
+    /// is converted on the GPU to BT.709 limited-range NV12 and only that is read back
+    /// (`w * h * 3 / 2` bytes). `None` when the size does not fit the stage or the device cannot
+    /// run it; the caller then asks for RGBA8.
+    pub fn render_export_nv12_prepared(&mut self, plan: &FramePlan, prep: Option<&PreparedPlan>) -> Option<(u32, u32, Vec<u8>)> {
+        if matches!(plan, FramePlan::Composite { .. }) || self.nv12_unavailable {
+            return None;
+        }
+        let t = std::time::Instant::now();
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("filmcraft-composite-export-nv12") });
+        let (_, (w, h)) = self.record_plan(&mut enc, plan, prep, true, true);
+        if !nv12::Nv12Stage::fits(w, h) {
+            return None;
+        }
+        if self.nv12.is_none() {
+            let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let stage = nv12::Nv12Stage::new(&self.device);
+            match poll_now(scope.pop()) {
+                Some(None) => self.nv12 = Some(stage),
+                _ => {
+                    log::warn!("GPU NV12 conversion unavailable on this device, converting on the CPU");
+                    self.nv12_unavailable = true;
+                    return None;
+                }
+            }
+        }
+        let src = self.output.as_ref()?.1.clone();
+        let size = self.nv12.as_mut()?.record(&self.device, &self.queue, &mut enc, &src, w, h)?;
+        let sub = self.queue.submit([enc.finish()]);
+        export_renderer::timing::add_submit(t.elapsed());
+        let t = std::time::Instant::now();
+        let out = self.nv12.as_ref()?.map(&self.device, size, Some(sub))?;
+        export_renderer::timing::add_map_wait(t.elapsed());
+        Some((w, h, out))
     }
 
     /// Run the effect stage of a layer alone: `frame` decoded into its working image and `fx`

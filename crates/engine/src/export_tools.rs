@@ -274,6 +274,9 @@ pub fn settings_from_params(s: &Session, p: &Value, cmd: &str) -> Result<(Option
             other => serde_json::from_value(other.clone()).map_err(|_| bad(cmd, "gpuRendering: off | auto"))?,
         };
     }
+    if let Some(v) = p.get("colorConversion") {
+        settings.color_conversion = serde_json::from_value(v.clone()).map_err(|_| bad(cmd, "colorConversion: auto | cpu"))?;
+    }
     if let Some(v) = bool_p(p, "burnCaptions") {
         settings.burn_captions = v;
     }

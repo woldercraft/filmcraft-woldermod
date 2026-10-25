@@ -226,6 +226,27 @@ impl ExportRenderer {
             FramePlan::Composite { .. } => None,
         }
     }
+
+    /// Composite a pre-built [`FramePlan`] over black and convert it on the GPU to BT.709
+    /// limited-range NV12 (only `w * h * 3 / 2` bytes are read back). `None` for a plan that is
+    /// not drawn as layers, a size the stage does not take, or a device without the stage.
+    pub fn render_plan_nv12(&mut self, plan: &FramePlan) -> Option<(u32, u32, Vec<u8>)> {
+        match plan {
+            FramePlan::Layers { .. } => {
+                if device_failed() {
+                    return None;
+                }
+                let prep = prepare(plan);
+                let (w, h, nv12) = self.compositor.as_mut()?.render_export_nv12_prepared(plan, Some(&prep))?;
+                if device_failed() {
+                    return None;
+                }
+                timing::add_frame();
+                Some((w, h, nv12))
+            }
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
