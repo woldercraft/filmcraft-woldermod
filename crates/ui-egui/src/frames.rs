@@ -112,6 +112,8 @@ struct Shared {
     workers: usize,
     /// Always-on counters for `perf.stats`.
     stats: Mutex<FrameStats>,
+    /// Signal to worker threads to exit when FrameServer is dropped.
+    shutdown: AtomicBool,
 }
 
 /// Cumulative frame-job statistics (`perf.stats`): cheap enough to keep on all the time.
@@ -422,6 +424,7 @@ impl FrameServer {
             render_cost: Mutex::new(0.0),
             workers: workers.max(1),
             stats: Mutex::new(FrameStats::default()),
+            shutdown: AtomicBool::new(false),
         });
         let repaint: Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>> = Arc::new(Mutex::new(None));
         #[cfg(not(target_arch = "wasm32"))]
@@ -598,7 +601,25 @@ impl FrameServer {
         }
         let (target, rev, cur) = (key.target, key.revision, key.frame);
         let span = (lead + ahead * stride) * step + 26;
-        self.retain_queue(|k| k.target != target || (k.revision == rev && (k.frame - cur) * dir >= 0 && (k.frame - cur).abs() < span));
+        self.retain_queue_playback(target, rev, cur, dir, span, rate.as_f64());
+    }
+
+    /// Playback queue maintenance: drop queued jobs that are stale or already past, but give
+    /// in-flight jobs a grace window to finish decoding so their frames can be shown and cached.
+    pub fn retain_queue_playback(&self, target: Target, rev: u64, cur: i64, dir: i64, span: i64, fps: f64) {
+        // Queued jobs behind the playhead are not worth starting.
+        self.shared.queue.lock().unwrap_or_else(|e| e.into_inner()).retain(|j| {
+            j.key.target != target || (j.key.revision == rev && (j.key.frame - cur) * dir >= 0 && (j.key.frame - cur).abs() < span)
+        });
+        // In-flight jobs: allow frames up to ~0.4s behind the playhead to finish rather than cancelling
+        // them midway and discarding all their decode work.
+        let max_behind = ((fps * 0.4).ceil() as i64).max(12);
+        for (k, c, _) in self.shared.in_flight.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+            let keep = k.target != target || (k.revision == rev && (cur - k.frame) * dir <= max_behind && (k.frame - cur).abs() < span);
+            if !keep {
+                c.store(true, Ordering::Relaxed);
+            }
+        }
     }
 
     /// Whether playback can start at `key`: the next [`PREROLL_FRAMES`] frames (up to `last`)
@@ -693,6 +714,13 @@ impl FrameServer {
     }
 }
 
+impl Drop for FrameServer {
+    fn drop(&mut self) {
+        self.shared.shutdown.store(true, Ordering::Release);
+        self.shared.cv.notify_all();
+    }
+}
+
 /// Counts shown and dropped frames while playing.
 ///
 /// A frame of the timeline is *shown* when its exact picture was on screen at some refresh while
@@ -775,6 +803,9 @@ fn worker(
         let job = {
             let mut q = sh.queue.lock().unwrap_or_else(|e| e.into_inner());
             loop {
+                if sh.shutdown.load(Ordering::Acquire) {
+                    return;
+                }
                 if !q.is_empty() {
                     // highest priority (lowest number) first; FIFO among equals
                     let best = q.iter().enumerate().min_by_key(|(i, j)| (j.prio, *i)).map(|(i, _)| i).unwrap_or(0);
@@ -785,6 +816,9 @@ fn worker(
                 q = sh.cv.wait(q).unwrap_or_else(|e| e.into_inner());
             }
         };
+        if sh.shutdown.load(Ordering::Acquire) {
+            return;
+        }
         // A panic while decoding or rendering one frame (bad media, a decoder bug) must not take
         // the worker down with it: a dead worker leaves its frame "in flight" forever and the
         // monitors blank. Log it, forget the job and keep serving.
@@ -852,10 +886,12 @@ fn run_job(sh: &Shared, job: &Job, pool: &Arc<MediaPool>, services: &Arc<dyn Ser
     let cancelled = job.cancel.load(Ordering::Relaxed);
     sh.in_flight.lock().unwrap_or_else(|e| e.into_inner()).retain(|(k, c, _)| !(*k == job.key && Arc::ptr_eq(c, &job.cancel)));
     if job.prefetch {
-        // Work beyond fetching source frames (decoding is sequential per source and is
-        // not saved by skipping frames, so it is left out of the estimate). A cancelled job
-        // only tells that the work takes at least this long.
-        let cost = started.elapsed().saturating_sub(SOURCE_TIME.with(|s| s.get()).0).as_secs_f64();
+        // Work beyond fetching source frames (compositing, GPU effects) plus the amortized
+        // source decode time per worker.
+        let source_dur = SOURCE_TIME.with(|s| s.get()).0;
+        let source = source_dur.as_secs_f64();
+        let render = started.elapsed().saturating_sub(source_dur).as_secs_f64();
+        let cost = render + source / sh.workers.max(1) as f64;
         let mut c = sh.render_cost.lock().unwrap_or_else(|e| e.into_inner());
         if !cancelled || cost > *c {
             *c = if *c == 0.0 { cost } else { *c * 0.8 + cost * 0.2 };
