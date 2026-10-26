@@ -225,20 +225,24 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
             format!("monitor-{prefix}")
         };
         let (shown, on_screen) = if use_gpu {
+            let max_back = ((rate.as_f64() * 0.5).ceil() as i64).max(12);
             let found = app
                 .frames
                 .get_plan(&key)
                 .map(|p| (key, p))
-                .or_else(|| app.frames.nearest_plan(key, 6))
+                .or_else(|| app.frames.nearest_plan(key, max_back))
                 .or_else(|| asked.iter().find_map(|k| app.frames.get_plan(k).map(|p| (*k, p))));
             match found {
                 Some((k, plan)) => (app.gpu_present(k, &plan).map(|(id, _)| id), Some(k)),
                 None => (app.gpu.as_ref().and_then(|g| g.texture), app.gpu.as_ref().and_then(|g| g.last_key)),
             }
-        } else if grid {
-            cpu_texture_as(app, &ctx, &tex_name, key, &asked, display, true)
         } else {
-            cpu_texture(app, &ctx, &tex_name, key, &asked, display)
+            let max_back = ((rate.as_f64() * 0.5).ceil() as i64).max(12);
+            if grid {
+                cpu_texture_as(app, &ctx, &tex_name, key, &asked, display, true, max_back)
+            } else {
+                cpu_texture(app, &ctx, &tex_name, key, &asked, display, max_back)
+            }
         };
         let exact = on_screen == Some(key);
         if which == Which::Program {
@@ -274,9 +278,9 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
                 ui.painter().rect_filled(rpic, 0.0, t.monitor_bg);
             }
             let (reference, _) = if mv.transparency_grid {
-                cpu_texture_as(app, &ctx, &format!("monitor-{prefix}-ref-grid"), rkey, &[], DisplayMode::Composite, true)
+                cpu_texture_as(app, &ctx, &format!("monitor-{prefix}-ref-grid"), rkey, &[], DisplayMode::Composite, true, 6)
             } else {
-                cpu_texture(app, &ctx, &format!("monitor-{prefix}-ref"), rkey, &[], DisplayMode::Composite)
+                cpu_texture(app, &ctx, &format!("monitor-{prefix}-ref"), rkey, &[], DisplayMode::Composite, 6)
             };
             if let Some(tex) = reference {
                 ui.painter().image(tex, rpic, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
@@ -516,8 +520,9 @@ fn cpu_texture(
     key: FrameKey,
     asked: &[FrameKey],
     mode: DisplayMode,
+    max_back: i64,
 ) -> (Option<egui::TextureId>, Option<FrameKey>) {
-    cpu_texture_as(app, ctx, name, key, asked, mode, false)
+    cpu_texture_as(app, ctx, name, key, asked, mode, false, max_back)
 }
 
 /// [`cpu_texture`], keeping the frame's alpha when `alpha` is set (the Transparency Grid).
@@ -529,12 +534,13 @@ fn cpu_texture_as(
     asked: &[FrameKey],
     mode: DisplayMode,
     alpha: bool,
+    max_back: i64,
 ) -> (Option<egui::TextureId>, Option<FrameKey>) {
     let found = app
         .frames
         .get(&key)
         .map(|img| (key, img))
-        .or_else(|| (1..=6).map(|d| FrameKey { frame: key.frame.saturating_sub(d), ..key }).find_map(|k| app.frames.get(&k).map(|img| (k, img))))
+        .or_else(|| (1..=max_back.max(1)).map(|d| FrameKey { frame: key.frame.saturating_sub(d), ..key }).find_map(|k| app.frames.get(&k).map(|img| (k, img))))
         .or_else(|| asked.iter().find_map(|k| app.frames.get(k).map(|img| (*k, img))));
     match found {
         Some((k, img)) => {
