@@ -23,7 +23,7 @@
 use egui::{Align2, Color32, Rect, Sense, pos2, vec2};
 use filmcraft_engine::export::presets::{DEFAULT_PRESET, preset_key};
 use filmcraft_engine::export::{
-    AudioCodec, BitrateMode, ExportSettings, ExrCompression, FieldOrder, Format, GpuRendering, H264Profile, HardwareEncoding, Multiplexer, MxfVideoCodec,
+    AudioCodec, BitrateMode, ColorConversion, ExportSettings, ExrCompression, FieldOrder, Format, GpuRendering, H264Profile, HardwareEncoding, Multiplexer, MxfVideoCodec,
     Placement, SampleFormat, Scaling, TextOverlay, builtin_presets, format_bytes,
 };
 use filmcraft_engine::time::{FrameRate, Tick};
@@ -950,6 +950,19 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
         };
         ui.label(egui::RichText::new(msg).size(11.0).color(col));
     });
+    if matches!(s.video_format(), Format::H264 | Format::Hevc) {
+        row(ui, t, tl!("Color Conversion"), |ui| {
+            let options = [
+                ("Auto (Direct GPU NV12 compute)", ColorConversion::Auto),
+                ("CPU (Software conversion)", ColorConversion::Cpu),
+            ];
+            let cur = if s.color_conversion == ColorConversion::Auto { options[0].0 } else { options[1].0 };
+            let labels: Vec<(String, bool)> = options.iter().map(|(l, _)| (l.to_string(), true)).collect();
+            if let Some(i) = combo(ui, reg, "export.video.colorConversion", cur, &labels, 240.0) {
+                s.color_conversion = options[i].1;
+            }
+        });
+    }
     row(ui, t, "", |ui| check(ui, reg, "export.video.maxDepth", &mut s.render_at_max_depth, tl!("Render at Maximum Depth")));
     row(ui, t, "", |ui| check(ui, reg, "export.video.maxQuality", &mut s.max_render_quality, tl!("Use Maximum Render Quality")));
 }
