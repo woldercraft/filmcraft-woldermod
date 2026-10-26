@@ -552,3 +552,59 @@ fn hdr_input_gpu_matches_cpu() {
         assert!(apart > 20, "{name}: colour management changed nothing ({apart})");
     }
 }
+
+#[test]
+fn gpu_compositor_sequence_plan_with_adjustment_layer_blurs() {
+    use filmcraft_time::{FrameRate, Tick, TICKS_PER_SECOND};
+    use filmcraft_media::{Generator, MediaSource, SharedSource};
+    use filmcraft_media::generators::GeneratorSource;
+    use filmcraft_render::SourceMap;
+    let Some((dev, q)) = device() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let mut c = GpuCompositor::new(&dev, &q);
+    let (w, h) = (320, 180);
+    let mut p = filmcraft_project::Project::new("adj_test");
+    let seq = p.new_sequence("s", filmcraft_project::SequenceSettings { width: w, height: h, frame_rate: FrameRate::FPS_24, ..Default::default() }, 2, 0, None);
+    let mut map = SourceMap::default();
+    let g = GeneratorSource::new(Generator::ColorMatte { color: [1.0, 0.0, 0.0, 1.0] }, w, h, FrameRate::FPS_24, Tick(10 * TICKS_PER_SECOND));
+    let info = g.info().clone();
+    let matte = p.add_item("m", filmcraft_project::Label::Iris, filmcraft_project::ItemKind::Media(filmcraft_project::MediaClip {
+        media: filmcraft_project::MediaRef::Generator(g.generator.clone()),
+        info,
+        interpret: Default::default(),
+        mark_in: None,
+        mark_out: None,
+        markers: Vec::new(),
+        offline: false,
+        proxy: None,
+        identity: None,
+    }), None);
+    map.0.insert(matte, std::sync::Arc::new(g) as SharedSource);
+    let ti1 = p.make_track_item(matte, filmcraft_project::TrackKind::Video, Tick::ZERO, filmcraft_time::TimeRange::new(Tick::ZERO, FrameRate::FPS_24.tick_of(48)), FrameRate::FPS_24).unwrap();
+    p.sequence_mut(seq).unwrap().video_tracks[0].items.push(ti1);
+
+    let plan0 = filmcraft_render::plan::plan_frame(&p, seq, Tick::ZERO, filmcraft_render::RenderOptions::default(), &map);
+    let prep0 = prepare(&plan0);
+    c.composite_prepared(&plan0, Some(&prep0));
+    let (_, _, out0) = c.read_output().expect("readback");
+
+    let adj = p.add_item("adj", filmcraft_project::Label::Lavender, filmcraft_project::ItemKind::AdjustmentLayer { width: w, height: h, rate: FrameRate::FPS_24, duration: FrameRate::FPS_24.tick_of(48) }, None);
+    let mut ti2 = p.make_track_item(adj, filmcraft_project::TrackKind::Video, Tick::ZERO, filmcraft_time::TimeRange::new(Tick::ZERO, FrameRate::FPS_24.tick_of(48)), FrameRate::FPS_24).unwrap();
+    let mut e = filmcraft_project::find_effect("gaussian_blur").unwrap().instance();
+    e.params.get_mut("blurriness").unwrap().value = filmcraft_project::ParamValue::Float(1830.2);
+    e.params.get_mut("repeat_edge").unwrap().value = filmcraft_project::ParamValue::Bool(false);
+    let pos = ti2.effects.iter().position(|e| e.def().is_some_and(|d| d.intrinsic)).unwrap_or(ti2.effects.len());
+    ti2.effects.insert(pos, e);
+    p.sequence_mut(seq).unwrap().video_tracks[1].items.push(ti2);
+
+    let plan1 = filmcraft_render::plan::plan_frame(&p, seq, Tick::ZERO, filmcraft_render::RenderOptions::default(), &map);
+    let prep1 = prepare(&plan1);
+    c.composite_prepared(&plan1, Some(&prep1));
+    let (_, _, out1) = c.read_output().expect("readback");
+
+    eprintln!("out0 at (100, 100): {:?}", &out0[100 * 320 * 4 + 100 * 4 .. 100 * 320 * 4 + 100 * 4 + 4]);
+    eprintln!("out1 at (100, 100): {:?}", &out1[100 * 320 * 4 + 100 * 4 .. 100 * 320 * 4 + 100 * 4 + 4]);
+    assert_ne!(out0, out1);
+}

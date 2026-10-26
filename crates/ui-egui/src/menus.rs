@@ -907,7 +907,33 @@ pub fn external_commands() -> Vec<filmcraft_engine::shortcuts::CommandInfo> {
 /// Draw the in-window menu bar.
 pub fn menu_bar(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
     ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("interface-language"), app.ui.language));
-    let items = menu_items(app);
+    let items = {
+        let is_dragging = app.tl.drag.is_some();
+        let cache_key = (
+            app.session.revision,
+            app.session.state.selection.len(),
+            app.session.state.selection.first().copied(),
+            app.session.state.selection.last().copied(),
+            app.session.state.transition_selection.len(),
+            app.session.state.active_sequence,
+            app.ui.language,
+            is_dragging,
+        );
+        let key_id = egui::Id::new("menu-items-cache-key");
+        let cache_id = egui::Id::new("menu-items-cached");
+        if ui.ctx().data(|d| d.get_temp(key_id)) == Some(cache_key)
+            && let Some(cached) = ui.ctx().data(|d| d.get_temp::<Vec<MenuItem>>(cache_id))
+        {
+            cached
+        } else {
+            let fresh = menu_items(app);
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(key_id, cache_key);
+                d.insert_temp(cache_id, fresh.clone());
+            });
+            fresh
+        }
+    };
     // Draw Edit ▸ Label with the user's live palette, not the baked-in label colours.
     let labels = app.session.prefs.labels.clone();
     let ctx = ui.ctx().clone();

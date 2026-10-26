@@ -18,6 +18,7 @@ pub mod import_mode;
 pub mod interchange_export;
 pub mod keyboard;
 pub mod lumetri;
+pub mod macro_timeline;
 pub mod masks;
 pub mod media_browser;
 pub mod media_dialogs;
@@ -34,6 +35,7 @@ pub mod panel_state;
 pub mod presets;
 pub mod project;
 pub mod project_dialogs;
+pub mod project_manager;
 pub mod project_views;
 pub mod reference;
 pub mod remix;
@@ -105,6 +107,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rect)
         PanelKind::EssentialSound => essential_sound::show(app, ui, rect),
         PanelKind::TextToSpeech => tts::show(app, ui, rect),
         PanelKind::ProjectNotes => notes::show(app, ui, rect),
+        PanelKind::MacroTimeline => macro_timeline::show(app, ui, rect),
         other => crate::dock::placeholder(ui, rect, &app.tokens, &tlf!("{panel} — coming in a later milestone", panel = crate::i18n::t(other.title()))),
     }
 }

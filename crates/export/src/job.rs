@@ -60,8 +60,8 @@
 //!   waiting for the render (large: render-bound; near zero: encode-bound).
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use filmcraft_isobmff::{Brand, Mp4Writer, PcmConfig, SampleEntry, TrackConfig, WriteSample, WriterOptions};
 use filmcraft_project::{ItemId, Project};
@@ -72,7 +72,7 @@ use rayon::prelude::*;
 use crate::audio_out::AudioOut;
 use crate::mxf_out::{MxfMux, MxfSetup};
 use crate::pipeline::Pipeline;
-use crate::settings::{AudioCodec, BitrateMode};
+use crate::settings::{AudioCodec, BitrateMode, ColorConversion};
 use crate::{
     AudioEncoder, ColorSignal, EncodedPacket, EncoderFrame, ExportError, ExportSettings, Format, H264Pass, Out, Progress, Report, Result, Stage, VideoEncoder,
     audio_factories, export_range, frame_span, note_stage, timed, video_factories,
@@ -114,18 +114,34 @@ struct Ahead {
 /// pending flag, taken after every frame because it is per thread): the batch is incomplete and
 /// must be rendered again.
 fn render_batch(pipe: &Pipeline, f: i64, end: i64, sources: &dyn SourceProvider) -> Option<Vec<Frame>> {
+    let count = usize::try_from((end - f).max(0)).unwrap_or(0);
+    if count == 0 {
+        return Some(Vec::new());
+    }
     let pending = AtomicBool::new(false);
-    let frames: Vec<Frame> = (f..end)
-        .into_par_iter()
-        .map(|fi| {
+    // Claim frames in strictly ascending order so Rayon work-stealing does not jump ahead in
+    // GopCache and stall other workers behind multi-frame forward seeks.
+    let next = AtomicUsize::new(0);
+    let slots: Vec<Mutex<Option<Frame>>> = (0..count).map(|_| Mutex::new(None)).collect();
+    (0..count).into_par_iter().for_each(|_| {
+        let i = next.fetch_add(1, Ordering::Relaxed);
+        if let Some(slot) = slots.get(i) {
+            let fi = f + i as i64;
             let frame = pipe.frame(fi, sources);
             if filmcraft_media::pending::take() {
                 pending.store(true, Ordering::Relaxed);
             }
-            frame
-        })
-        .collect();
-    (!pending.load(Ordering::Relaxed)).then_some(frames)
+            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(frame);
+        }
+    });
+    if pending.load(Ordering::Relaxed) {
+        return None;
+    }
+    let mut frames = Vec::with_capacity(count);
+    for slot in slots {
+        frames.push(slot.into_inner().unwrap_or_else(|e| e.into_inner())?);
+    }
+    Some(frames)
 }
 
 /// What encoding a batch came to.
@@ -252,6 +268,7 @@ impl Exporter {
             progress.set_status(format!("Exporting {} frames ({})", nframes, settings.format.label()));
         }
         let venc = make_venc(&settings, pipe.w, pipe.h, pipe.rate)?;
+        pipe.set_nv12(settings.color_conversion == ColorConversion::Auto && venc.accepts_nv12());
         let brand = if settings.format.is_mp4_with(settings.multiplexer) { Brand::Mp4 } else { Brand::Mov };
         let audio = if settings.has_audio() { Some(AudioOut::new(project.clone(), seq, &settings, range)?) } else { None };
         let aenc: Option<Box<dyn AudioEncoder>> = match (&audio, settings.audio_codec()) {
@@ -271,7 +288,7 @@ impl Exporter {
             next: f0,
             batch: rayon::current_num_threads().clamp(2, 16) as i64,
             overlap: true,
-            budget: IN_FLIGHT_BUDGET,
+            budget: if cfg!(test) { IN_FLIGHT_BUDGET } else { IN_FLIGHT_BUDGET * 2 },
             ahead: None,
             overlapped_steps: 0,
             brand,
@@ -471,6 +488,7 @@ impl Exporter {
             let stats = self.venc.pass_stats().ok_or_else(|| ExportError::Encode("two-pass statistics missing".into()))?;
             self.settings.h264_pass = H264Pass::Second(stats);
             self.venc = make_venc(&self.settings, self.pipe.w, self.pipe.h, self.pipe.rate)?;
+            self.pipe.set_nv12(self.settings.color_conversion == ColorConversion::Auto && self.venc.accepts_nv12());
             self.first_pass = false;
             self.next = self.f0;
             return Ok(Step::Progress);
@@ -530,6 +548,27 @@ impl Exporter {
         let (f, frames) = match self.ahead.take() {
             Some(a) if a.first == self.next => (a.first, a.frames),
             _ => {
+                if !cfg!(target_arch = "wasm32") && self.next == self.f0 {
+                    timed(Stage::Setup, || {
+                        if let Some(seq) = self.project.sequence(self.seq) {
+                            let range = filmcraft_time::TimeRange::from_bounds(self.pipe.rate.tick_of(self.f0), self.pipe.rate.tick_of(self.f1));
+                            let mut items: Vec<ItemId> = seq
+                                .video_tracks
+                                .iter()
+                                .chain(&seq.audio_tracks)
+                                .filter(|tr| tr.enabled)
+                                .flat_map(|tr| &tr.items)
+                                .filter(|it| it.enabled && it.range().overlaps(&range))
+                                .map(|it| it.item)
+                                .collect();
+                            items.sort_unstable();
+                            items.dedup();
+                            items.into_par_iter().for_each(|id| {
+                                let _ = sources.source(id);
+                            });
+                        }
+                    });
+                }
                 let (f, end) = (self.next, self.next.saturating_add(self.batch_len()).min(self.f1));
                 let pipe = &self.pipe;
                 match timed(Stage::Render, || render_batch(pipe, f, end, sources)) {

@@ -196,10 +196,30 @@ fn zone(w: f32) -> Option<f32> {
     if w.is_finite() && w > 0.0 { Some(EDGE_PX.min(w / 3.0)) } else { None }
 }
 
+/// Find the index range `(start_idx, end_idx)` of items in `items` (sorted by `start`) that may overlap `[start_tick, end_tick]`.
+pub fn visible_item_indices(items: &[filmcraft_project::TrackItem], start_tick: Tick, end_tick: Tick) -> (usize, usize) {
+    if items.is_empty() {
+        return (0, 0);
+    }
+    let start_idx = items.partition_point(|i| i.end() <= start_tick);
+    let end_idx = items[start_idx..].partition_point(|i| i.start <= end_tick) + start_idx;
+    (start_idx, end_idx)
+}
+
 /// The clip edge on `tr` a pointer at `x` grabs (#259), whatever the order of `tr.items`.
 fn edge_at(tr: &Track, layout: &Layout, x: f32) -> Option<(ClipId, Edge)> {
+    if tr.items.is_empty() {
+        return None;
+    }
     let mut best: Option<Reach> = None;
-    for it in &tr.items {
+    let t = layout.tick_at(x);
+    let dt = Tick::from_seconds_f64((EDGE_PX as f64 / layout.pps.max(0.01)).max(0.05)) + Tick(1);
+    let (s, e) = if tr.items.len() > 64 && tr.items.first().map(|f| f.start) <= tr.items.last().map(|l| l.start) {
+        visible_item_indices(&tr.items, t - dt, t + dt)
+    } else {
+        (0, tr.items.len())
+    };
+    for it in &tr.items[s..e] {
         let (x0, x1) = (layout.x_of(it.start), layout.x_of(it.end()));
         let Some(e) = zone(x1 - x0) else { continue };
         // the pointer's distance into the clip from each of its edges

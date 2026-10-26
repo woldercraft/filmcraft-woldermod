@@ -171,9 +171,6 @@
 	Hide All Caption Tracks	すべてのキャプショントラックを非表示
 	High Quality Playback	高画質再生
 	History	履歴
-	Delete Redoable Actions	やり直し可能な操作を削除
-	Clear History	履歴を消去
-	Delete the dimmed actions after the current state? They cannot be redone.	現在の状態より後の淡色表示の操作を削除しますか？ 削除した操作はやり直せません。
 	Import From	読み込み元
 	Import Image Sequence…	連番画像を読み込み…
 	Import from Media Browser	メディアブラウザーから読み込み
@@ -323,7 +320,6 @@
 	Show Active Caption Tracks Only	アクティブなキャプショントラックのみ表示
 	Show All Caption Tracks	すべてのキャプショントラックを表示
 	Show All Marker Colors	すべての色のマーカーを表示
-	Show Duplicate Frame Markers	重複フレームマーカーを表示
 	Show Guides	ガイドを表示
 	Show Rulers	ルーラーを表示
 	Show Through Edits	スルー編集点を表示
@@ -349,7 +345,6 @@
 	Transcribe Sequence…	シーケンスを文字起こし…
 	Transcribe…	文字起こし…
 	Transcript	文字起こし
-	Transparency Grid	透明グリッド
 	Transparent Video…	透明ビデオ…
 	Trim Edit	トリム編集
 	Trim…	トリム…
@@ -510,10 +505,6 @@
 	Reveal Sequence in Project	プロジェクトでシーケンスを表示
 	Video Thumbnails	ビデオサムネイル
 	Audio Waveforms	オーディオ波形
-	Work Area Bar	ワークエリアバー
-	Start: {tc}	開始: {tc}
-	End: {tc}	終了: {tc}
-	Duration: {tc}	長さ: {tc}
 	Delete Preset	プリセットを削除
 	Export Preset…	プリセットを書き出し…
 	Import Presets…	プリセットを読み込み…
@@ -3625,5 +3616,39 @@
 	Open a sequence to search its graphics	シーケンスを開くとグラフィックスを検索できます
 	No text graphics in this sequence. Add text with the Type tool.	このシーケンスにはテキストのグラフィックスがありません。文字ツールでテキストを追加してください。
 	No matching text.	一致するテキストはありません。
-	H.265 (HEVC) needs a hardware encoder (NVENC on NVIDIA GPUs, VideoToolbox on macOS); none was found on this machine, and FilmCraft has no software H.265 encoder yet. Choose H.264 or ProRes instead.	H.265 (HEVC) にはハードウェアエンコーダー（NVIDIA GPU の NVENC、macOS の VideoToolbox）が必要です。このマシンには見つからず、FilmCraft にはまだソフトウェアの H.265 エンコーダーがありません。代わりに H.264 または ProRes を選んでください。
-	AV1 needs a hardware encoder; none was found on this machine, and FilmCraft has no software AV1 encoder yet.	AV1 にはハードウェアエンコーダーが必要です。このマシンには見つからず、FilmCraft にはまだソフトウェアの AV1 エンコーダーがありません。
+	Remove Silence…	無音を削除…
+	Remove Silence	無音を削除
+	Threshold:	しきい値:
+	Pre head:	先頭マージン:
+	Post tail:	末尾マージン:
+	Minimum to strip:	削除する最小無音長:
+	Cross fade audio	オーディオのクロスフェード
+	Preview:	プレビュー:
+	Visible area	表示領域
+	Entire clip	クリップ全体
+	Entire sequence	シーケンス全体
+	{count} silences detected ({sec}s)	{count} 件の無音を検出 ({sec}秒)
+	Detecting silences…	無音を検出中…
+	Fast Selection Mode (High Performance)	高速選択モード (高パフォーマンス)
+	Fast Selection Mode active ({count} clips)	高速選択モード有効 ({count} クリップ)
+	Fast Selection Mode active	高速選択モード有効
+	Approaching limit ({count}/{limit} clips) — click for Fast Selection Mode	上限に近づいています ({count}/{limit} クリップ) — クリックで高速選択モード
+	Fast Selection Mode activated ({count} clips selected) — high-performance rendering enabled	高速選択モードが有効化されました ({count} クリップ選択中) — 高パフォーマンス描画が有効です
+	Approaching selection limit ({count}/{limit} clips) — Fast Selection Mode will activate at {limit} clips	選択上限に近づいています ({count}/{limit} クリップ) — {limit} クリップで高速選択モードが有効化されます
+	Auto (Hardware when available)	自動 (利用可能な場合はハードウェア)
+	Codec	コーデック
+	GPU Acceleration	GPUアクセラレーション
+	Native / CPU (Software x264)	ネイティブ / CPU (ソフトウェア x264)
+	Heavy Selection Detected	高い選択負荷を検出
+	Selecting {count} clips in Traditional Mode can freeze the application. Switch to Fast Selection Mode for high-performance editing.	従来モードで {count} 個のクリップを選択するとアプリがフリーズする可能性があります。高パフォーマンス編集のために高速選択モードに切り替えてください。
+	⚡ Switch to Fast Selection Mode	⚡ 高速選択モードに切り替え
+	Keep Traditional Mode	従来モードを維持
+	Apply Changes & Exit (Enter)	変更を適用して終了 (Enter)
+	Cancel (Esc)	キャンセル (Esc)
+	Do not show this message again (remember choice)	今後このメッセージを表示しない (選択を記憶)
+	Pending Move: {count} clips ({offset})	保留中の移動: {count} クリップ ({offset})
+	Macro Timeline	マクロタイムライン
+	Show Macro Timeline (Dual View)	マクロタイムラインを表示（デュアルビュー）
+	Toggle Macro Timeline (Dual View)	マクロタイムラインの切り替え（デュアルビュー）
+	⚡ Fast Mode: ON	⚡ 高速モード: オン
+	Fast Mode: OFF	高速モード: オフ

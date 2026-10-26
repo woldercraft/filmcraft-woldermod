@@ -9,7 +9,7 @@
 //! damped exponential easing, anchored under the cursor) so navigation feels fluid; all geometry is
 //! drawn as GPU meshes by egui's wgpu backend and culled to the visible range.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use egui::{Align2, Color32, CursorIcon, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
@@ -52,6 +52,13 @@ const SNAP_PX: f32 = 9.0;
 /// Waveform peaks are kept per audio stream: (item, index into the media's `audio_streams`).
 pub type PeakKey = (ItemId, usize);
 
+#[derive(Clone, Debug)]
+pub struct SilencePreview {
+    pub key: (i64, i64, i64, i64, bool, Option<(i64, i64)>),
+    pub ranges: Vec<TimeRange>,
+    pub total_seconds: f64,
+}
+
 /// Transient interaction state.
 #[derive(Default)]
 pub struct TlState {
@@ -83,6 +90,32 @@ pub struct TlState {
     /// The markers being worked out on a background thread, and where the thread leaves them.
     duplicates_pending: Option<DuplicatesKey>,
     duplicates_done: Arc<Mutex<Option<(DuplicatesKey, DuplicateMarkers)>>>,
+    pub silence_preview: Option<SilencePreview>,
+    pub silence_change_time: Option<f64>,
+    pub silence_last_key: Option<(i64, i64, i64, i64, bool, Option<(i64, i64)>)>,
+    /// Whether the approaching-limit warning toast/status has been shown for the current selection.
+    pub fast_mode_warned: bool,
+    /// Whether the auto-activated Fast Selection Mode toast/status has been shown for the current selection.
+    pub fast_mode_auto_notified: bool,
+    /// When selecting many clips in traditional mode, prompts the user to switch to Fast Selection Mode.
+    pub fast_mode_prompt: Option<usize>,
+    /// Whether the user dismissed the prompt for the current selection gesture.
+    pub fast_mode_prompt_dismissed: bool,
+    /// Cached HashSet of selected clips to avoid per-frame rehashing when thousands of clips are selected.
+    pub selection_cache: Option<(usize, Option<ClipId>, Option<ClipId>, Arc<HashSet<ClipId>>)>,
+    /// A pending move waiting for user confirmation before committing changes to the project.
+    pub pending_move: Option<PendingMove>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PendingMove {
+    pub clips: Arc<Vec<ClipId>>,
+    pub offset: Tick,
+    pub track_delta: i32,
+    pub new_track: Option<(TrackKind, Rect)>,
+    pub copy: bool,
+    pub bounds: (Tick, Tick),
+    pub all_unlocked: bool,
 }
 
 /// (session revision, sequence, project address)

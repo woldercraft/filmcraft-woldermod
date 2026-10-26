@@ -164,9 +164,6 @@
 	Hide All Caption Tracks	隐藏所有字幕轨道
 	High Quality Playback	高质量播放
 	History	历史记录
-	Delete Redoable Actions	删除可重做的操作
-	Clear History	清除历史记录
-	Delete the dimmed actions after the current state? They cannot be redone.	删除当前状态之后显示为灰色的操作？删除后将无法重做。
 	Import From	导入来源
 	Import Image Sequence…	导入图像序列…
 	Import from Media Browser	从媒体浏览器导入
@@ -317,7 +314,6 @@
 	Show Active Caption Tracks Only	仅显示活动字幕轨道
 	Show All Caption Tracks	显示所有字幕轨道
 	Show All Marker Colors	显示所有标记颜色
-	Show Duplicate Frame Markers	显示重复帧标记
 	Show Guides	显示参考线
 	Show Rulers	显示标尺
 	Show Through Edits	显示贯通编辑
@@ -343,7 +339,6 @@
 	Transcribe Sequence…	转录序列…
 	Transcribe…	转录…
 	Transcript	转录文稿
-	Transparency Grid	透明网格
 	Transparent Video…	透明视频…
 	Trim Edit	修剪编辑
 	Trim…	修剪…
@@ -504,10 +499,6 @@
 	Reveal Sequence in Project	在项目面板中显示序列
 	Video Thumbnails	视频缩略图
 	Audio Waveforms	音频波形
-	Work Area Bar	工作区域栏
-	Start: {tc}	开始：{tc}
-	End: {tc}	结束：{tc}
-	Duration: {tc}	持续时间：{tc}
 	Delete Preset	删除预设
 	Export Preset…	导出预设…
 	Import Presets…	导入预设…
@@ -3601,5 +3592,39 @@
 	Open a sequence to search its graphics	打开序列以搜索其中的图形
 	No text graphics in this sequence. Add text with the Type tool.	此序列中没有文本图形。请用文字工具添加文本。
 	No matching text.	没有匹配的文本。
-	H.265 (HEVC) needs a hardware encoder (NVENC on NVIDIA GPUs, VideoToolbox on macOS); none was found on this machine, and FilmCraft has no software H.265 encoder yet. Choose H.264 or ProRes instead.	H.265 (HEVC) 需要硬件编码器（NVIDIA GPU 上的 NVENC、macOS 上的 VideoToolbox）；本机未找到，且 FilmCraft 尚无软件 H.265 编码器。请改选 H.264 或 ProRes。
-	AV1 needs a hardware encoder; none was found on this machine, and FilmCraft has no software AV1 encoder yet.	AV1 需要硬件编码器；本机未找到，且 FilmCraft 尚无软件 AV1 编码器。
+	Remove Silence…	消除静音…
+	Remove Silence	消除静音
+	Threshold:	阈值：
+	Pre head:	前置缓冲：
+	Post tail:	后置缓冲：
+	Minimum to strip:	最小消除长度：
+	Cross fade audio	音频交叉淡化
+	Preview:	预览：
+	Visible area	可见区域
+	Entire clip	整个剪辑
+	Entire sequence	整个序列
+	{count} silences detected ({sec}s)	检测到 {count} 处静音 ({sec}秒)
+	Detecting silences…	正在检测静音…
+	Fast Selection Mode (High Performance)	快速选择模式（高性能）
+	Fast Selection Mode active ({count} clips)	快速选择模式已激活（{count} 个剪辑）
+	Fast Selection Mode active	快速选择模式已激活
+	Approaching limit ({count}/{limit} clips) — click for Fast Selection Mode	接近选择上限（{count}/{limit} 个剪辑）— 点击开启快速选择模式
+	Fast Selection Mode activated ({count} clips selected) — high-performance rendering enabled	已激活快速选择模式（已选 {count} 个剪辑）— 已开启高性能渲染
+	Approaching selection limit ({count}/{limit} clips) — Fast Selection Mode will activate at {limit} clips	接近选择上限（{count}/{limit} 个剪辑）— 达到 {limit} 个剪辑时将自动激活快速选择模式
+	Auto (Hardware when available)	自动（可用时使用硬件）
+	Codec	编解码器
+	GPU Acceleration	GPU 加速
+	Native / CPU (Software x264)	原生 / CPU（软件 x264）
+	Heavy Selection Detected	检测到高负载选择
+	Selecting {count} clips in Traditional Mode can freeze the application. Switch to Fast Selection Mode for high-performance editing.	在传统模式下选择 {count} 个剪辑可能会导致应用程序卡死。请切换到快速选择模式以进行高性能编辑。
+	⚡ Switch to Fast Selection Mode	⚡ 切换到快速选择模式
+	Keep Traditional Mode	保持传统模式
+	Apply Changes & Exit (Enter)	应用更改并退出 (Enter)
+	Cancel (Esc)	取消 (Esc)
+	Do not show this message again (remember choice)	不再显示此消息（记住选择）
+	Pending Move: {count} clips ({offset})	待定移动: {count} 个剪辑 ({offset})
+	Macro Timeline	宏时间线
+	Show Macro Timeline (Dual View)	显示宏时间线（双视图）
+	Toggle Macro Timeline (Dual View)	切换宏时间线（双视图）
+	⚡ Fast Mode: ON	⚡ 快速模式：开启
+	Fast Mode: OFF	快速模式：关闭

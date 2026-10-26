@@ -47,10 +47,22 @@ pub fn narration_of(s: &Session, item: ItemId) -> Option<&Narration> {
 /// The narration clip a command works on: `clip`, else the first selected clip whose item is a
 /// narration.
 pub fn target_clip(s: &Session, p: &Value) -> Option<ClipId> {
+    if s.project.narrations.is_empty() {
+        return None;
+    }
     let seq = s.active_sequence()?;
     let is_narration = |c: ClipId| seq.find_item(c).is_some_and(|(_, it)| s.project.narrations.contains_key(&it.item));
     match u64_p(p, "clip") {
         Some(c) => Some(ClipId(c)).filter(|c| is_narration(*c)),
+        None if s.state.selection.len() > 16 => {
+            let narration_clips: std::collections::HashSet<ClipId> = seq
+                .all_tracks()
+                .flat_map(|t| t.items.iter())
+                .filter(|it| s.project.narrations.contains_key(&it.item))
+                .map(|it| it.id)
+                .collect();
+            s.state.selection.iter().copied().find(|c| narration_clips.contains(c))
+        }
         None => s.state.selection.iter().copied().find(|c| is_narration(*c)),
     }
 }

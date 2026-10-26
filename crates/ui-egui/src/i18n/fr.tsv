@@ -321,7 +321,6 @@
 	Show Active Caption Tracks Only	Afficher uniquement les pistes de sous-titres actives
 	Show All Caption Tracks	Afficher toutes les pistes de sous-titres
 	Show All Marker Colors	Afficher toutes les couleurs de marqueur
-	Show Duplicate Frame Markers	Afficher les marqueurs d'images en double
 	Show Guides	Afficher les repères
 	Show Rulers	Afficher les règles
 	Show Through Edits	Afficher les points de montage traversants
@@ -3585,3 +3584,16 @@
 	Open a sequence to search its graphics	Ouvrez une séquence pour rechercher dans ses graphiques
 	No text graphics in this sequence. Add text with the Type tool.	Aucun graphique avec du texte dans cette séquence. Ajoutez du texte avec l'outil Texte.
 	No matching text.	Aucun texte ne correspond.
+	Remove Silence…	Supprimer les silences…
+	Remove Silence	Supprimer les silences
+	Threshold:	Seuil :
+	Pre head:	Marge début :
+	Post tail:	Marge fin :
+	Minimum to strip:	Silence minimal à couper :
+	Cross fade audio	Fondu enchaîné audio
+	Preview:	Aperçu :
+	Visible area	Zone visible
+	Entire clip	Clip entier
+	Entire sequence	Séquence entière
+	{count} silences detected ({sec}s)	{count} silences détectés ({sec}s)
+	Detecting silences…	Détection des silences…

@@ -208,6 +208,15 @@ pub struct TimelineView {
     /// (`volume`, `pan`, `mute`, `send.<i>.level`, `fx.<slot>.<param>`).
     #[serde(default)]
     pub track_lanes: std::collections::BTreeMap<u64, String>,
+    /// Lightweight high-performance mode for heavy multi-clip selections and drags.
+    #[serde(default)]
+    pub fast_selection_mode: bool,
+    /// Do not show the prompt dialog suggesting to switch to Fast Selection Mode.
+    #[serde(default)]
+    pub fast_mode_prompt_never_show: bool,
+    /// Dual Timeline / Macro Timeline overview strip integrated into the timeline.
+    #[serde(default)]
+    pub show_macro_timeline: bool,
 }
 
 impl TimelineView {
@@ -238,6 +247,9 @@ impl Default for TimelineView {
             seen_playhead: None,
             fit_empty: None,
             track_lanes: Default::default(),
+            fast_selection_mode: false,
+            fast_mode_prompt_never_show: false,
+            show_macro_timeline: false,
         }
     }
 }
@@ -495,6 +507,9 @@ pub struct UiState {
     /// Export mode: settings, preset, destination, range, the Preset Manager and Quick Export.
     #[serde(default)]
     pub export: crate::panels::export_mode::ExportUi,
+    /// DaVinci Resolve-style Project Manager / Browser.
+    #[serde(default)]
+    pub project_browser: crate::panels::project_manager::ProjectManagerUi,
     /// Text panel: active tab ("Transcript" / "Captions" / "Graphics").
     #[serde(default = "captions_tab")]
     pub text_tab: String,
@@ -992,6 +1007,7 @@ impl Default for UiState {
             essential_sound_tab: "Edit".into(),
             tts: Default::default(),
             export: Default::default(),
+            project_browser: Default::default(),
             text_tab: captions_tab(),
             caption_search: String::new(),
             transcript_sel: None,

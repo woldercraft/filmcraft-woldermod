@@ -9,8 +9,7 @@ Usage: filmcraft [options] [project.fcproj | media files...]
 
 Options:
   --control <port>   start the localhost JSON-lines control server
-                     (also: FILMCRAFT_CONTROL_PORT; requires FILMCRAFT_CONTROL_TOKEN,
-                     64 random hex characters; see docs/control-protocol.md)
+                     (also: FILMCRAFT_CONTROL_PORT)
   --control-input-only  accept widget input only from the control server
                      (requires --control or FILMCRAFT_CONTROL_PORT)
   --demo             open the demo project
@@ -22,6 +21,7 @@ Options:
   --graphics <mode>  start with this graphics mode and keep it: default,
                      dx12 (Windows), software (Windows, Linux);
                      `--graphics default` undoes an automatic fallback
+  --x11              run via X11 / XWayland on Linux (enables file drag-and-drop)
   --version          print the version and exit
   -h, --help         print this help and exit
 ";
@@ -48,6 +48,8 @@ pub struct Launch {
     pub data_dir: Option<std::path::PathBuf>,
     /// `--graphics <mode>`: start with this graphics mode and keep it (see `graphics.rs`).
     pub graphics: Option<crate::graphics::Mode>,
+    /// `--x11`: run via X11 / XWayland backend on Linux for drag-and-drop compatibility.
+    pub x11: bool,
 }
 
 /// Parse the arguments after the program name. `env_control_port` is the value of
@@ -71,6 +73,7 @@ pub fn parse(env_control_port: Option<String>, args: impl IntoIterator<Item = Os
         recover: None,
         data_dir: None,
         graphics: None,
+        x11: false,
     };
     let (mut help, mut version) = (false, false);
     let mut args = args.into_iter();
@@ -79,6 +82,7 @@ pub fn parse(env_control_port: Option<String>, args: impl IntoIterator<Item = Os
         match a.as_ref() {
             "-h" | "--help" => help = true,
             "--version" => version = true,
+            "--x11" => l.x11 = true,
             "--control" => {
                 let port = args.next().ok_or("--control needs a port number")?;
                 let port = port.to_string_lossy();
@@ -235,7 +239,8 @@ mod tests {
                 startup_flag: false,
                 recover: None,
                 data_dir: None,
-                graphics: None
+                graphics: None,
+                x11: false,
             }
         );
         let l = launch(&["--control", "9876", "--empty", "--no-recover", "--data-dir", "/tmp/fc", "cut.fcproj", "a.mp4"]);

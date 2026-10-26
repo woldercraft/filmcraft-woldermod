@@ -36,7 +36,7 @@ rfd = { workspace = true }
 cpal = "0.16"
 # Files and images on the system clipboard for Paste (#611); egui already uses it for text.
 arboard = "3"
-chrono = { workspace = true, features = ["clock"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 sys-locale = "0.3"
 # Help menu / About / Discord links in the system browser (MIT; as PhotoCraft).
 open = "5"
@@ -58,6 +58,8 @@ winit = { version = "0.30", default-features = false }
 # Settings ▸ Appearance ▸ Sync with system: the XDG desktop portal's colour scheme. The zbus the
 # portal file dialogs (rfd) and accesskit already use.
 zbus = "5.19"
+# Same winit as eframe: Linux event-loop options (enables --x11 backend for drag-and-drop).
+winit = { version = "0.30", default-features = false, features = ["x11"] }
 
 # Icon + VERSIONINFO for filmcraft.exe (build.rs); only needed when building on Windows.
 [target.'cfg(windows)'.build-dependencies]

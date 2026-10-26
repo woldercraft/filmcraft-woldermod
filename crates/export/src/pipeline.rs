@@ -78,6 +78,8 @@ impl Geometry {
 struct RendererPool {
     /// Initial capacity, also the maximum number of frame tasks admitted at once.
     capacity: usize,
+    /// Whether the pooled renderers accept a pre-planned [`filmcraft_render::plan::FramePlan`].
+    supports_plan: bool,
     renderers: std::sync::Mutex<Vec<Box<dyn FrameRenderer>>>,
     available: std::sync::Condvar,
     /// A renderer panicked: the pool is retired and the rest of the export renders on the CPU.
@@ -87,8 +89,10 @@ struct RendererPool {
 impl RendererPool {
     /// `None` for an empty list (a pool nobody could take from).
     fn new(renderers: Vec<Box<dyn FrameRenderer>>) -> Option<Self> {
+        let supports_plan = renderers.first().is_some_and(|r| r.supports_plan());
         (!renderers.is_empty()).then(|| Self {
             capacity: renderers.len(),
+            supports_plan,
             renderers: std::sync::Mutex::new(renderers),
             available: std::sync::Condvar::new(),
             failed: std::sync::atomic::AtomicBool::new(false),
@@ -160,6 +164,9 @@ pub(crate) struct Pipeline {
     /// Free the pool's float images when the export ends: a standalone export, not one part of a
     /// batch (`ExportSettings::part_of_batch`).
     trim_pool: bool,
+    /// Frames may leave as ready NV12 (`w * h * 3 / 2` bytes) instead of RGBA8: the encoder takes
+    /// it and Color conversion is Auto ([`Pipeline::set_nv12`]).
+    nv12: std::sync::atomic::AtomicBool,
 }
 
 impl Drop for Pipeline {
@@ -214,9 +221,9 @@ impl Pipeline {
         let renderer = if settings.gpu_rendering == GpuRendering::Off {
             None
         } else {
-            // Four renderers: as fast as one per worker (measured on 16 threads, where more only
-            // contend for memory bandwidth in the read-back), with a quarter of the GPU memory.
-            let count = rayon::current_num_threads().clamp(2, 4);
+            // Up to 16 GPU renderers in the pool (one per Rayon thread) so larger batches stay in
+            // flight and saturate the GPU and hardware encoder without idling between read-backs.
+            let count = rayon::current_num_threads().clamp(4, 16);
             let mut list = Vec::with_capacity(count);
             for _ in 0..count {
                 if let Some(r) = build_frame_renderer() {
@@ -233,6 +240,7 @@ impl Pipeline {
             start_tc: q.start_timecode,
             drop_frame: q.settings.drop_frame,
             trim_pool: !settings.part_of_batch,
+            nv12: std::sync::atomic::AtomicBool::new(false),
             project: project.clone(),
             seq,
             rate: r.rate,
@@ -248,10 +256,31 @@ impl Pipeline {
         })
     }
 
+    /// Let eligible frames leave the GPU already converted to NV12 (`on`), for an encoder that
+    /// takes it. Frames the GPU cannot convert still come out as RGBA8; the encoder tells the
+    /// two apart by length.
+    pub(crate) fn set_nv12(&self, on: bool) {
+        self.nv12.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether the export needs no CPU post-processing between the composited linear accumulator
+    /// and the final sRGB over-black RGBA8 output (so the GPU can resolve directly to `Rgba8Unorm`).
+    fn can_direct_rgba8(&self) -> bool {
+        let fx = &self.effects;
+        !self.hdr_out
+            && !self.alpha
+            && self.geom.offset == (0, 0)
+            && self.geom.content.is_none_or(|(cw, ch)| (cw, ch) == (self.w as usize, self.h as usize))
+            && self.overlay.is_none()
+            && !(fx.name_overlay.enabled && !fx.name_overlay.text.trim().is_empty())
+            && !fx.timecode_overlay.enabled
+    }
+
     /// Output frame `f` as straight sRGB RGBA8 at the output size, or for HDR exports the encoded
     /// R'G'B' floats (3 per pixel).
     pub fn frame(&self, f: i64, sources: &dyn SourceProvider) -> (Vec<u8>, Vec<f32>) {
         let t = self.rate.tick_of(f);
+        let lim = &self.effects.video_limiter;
         // The registered GPU renderer goes first; `None` (no adapter, a plan the GPU cannot
         // draw, any internal error) falls back to the CPU reference renderer below. A frame the
         // planner hands back as one CPU image anyway (an adjustment layer, a complex transition,
@@ -259,6 +288,54 @@ impl Pipeline {
         // many frames at a time as there are renderers instead of one per export thread.
         let pool = self.renderer.as_ref().filter(|_| !filmcraft_render::plan::is_cpu_frame(&self.project, self.seq, t));
         let gpu = match pool {
+            Some(pool) if pool.supports_plan => {
+                // Decode and plan the frame BEFORE acquiring a GPU renderer from the pool so
+                // renderers never sit idle while a worker thread waits on media decoding.
+                let plan = filmcraft_render::plan::plan_frame(&self.project, self.seq, t, self.opts, sources);
+                match &plan {
+                    filmcraft_render::plan::FramePlan::Image(img) => Some(img.clone()),
+                    filmcraft_render::plan::FramePlan::Composite { .. } => None,
+                    filmcraft_render::plan::FramePlan::Layers { width, height, .. } => {
+                        if self.can_direct_rgba8() && (*width, *height) == (self.w as usize, self.h as usize) {
+                            // GPU colour conversion: only the NV12 picture comes back (the limiter
+                            // works on RGBA, so it keeps the RGBA route)
+                            if self.nv12.load(std::sync::atomic::Ordering::Relaxed) && !lim.enabled {
+                                let asked = web_time::Instant::now();
+                                let nv12 = pool
+                                    .with(|r| {
+                                        crate::note_lock_wait(asked.elapsed());
+                                        r.render_plan_nv12(&plan)
+                                    })
+                                    .flatten();
+                                if let Some((_, _, nv12)) = nv12 {
+                                    note_gpu_frame();
+                                    return (nv12, Vec::new());
+                                }
+                            }
+                            let asked = web_time::Instant::now();
+                            let direct = pool
+                                .with(|r| {
+                                    crate::note_lock_wait(asked.elapsed());
+                                    r.render_plan_rgba8(&plan)
+                                })
+                                .flatten();
+                            if let Some((_, _, mut rgba)) = direct {
+                                note_gpu_frame();
+                                if lim.enabled {
+                                    limit_rgba8(&mut rgba, lim.min_percent, lim.max_percent);
+                                }
+                                return (rgba, Vec::new());
+                            }
+                        }
+                        let asked = web_time::Instant::now();
+                        pool.with(|r| {
+                            crate::note_lock_wait(asked.elapsed());
+                            r.render_plan(&plan)
+                        })
+                        .flatten()
+                    }
+                }
+            }
             Some(pool) => {
                 let asked = web_time::Instant::now();
                 pool.with(|r| {

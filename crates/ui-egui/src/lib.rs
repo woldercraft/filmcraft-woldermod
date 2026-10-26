@@ -908,6 +908,7 @@ impl FilmcraftApp {
                 | PanelKind::Text
                 | PanelKind::ReferenceMonitor
                 | PanelKind::Timecode => PanelKind::Source,
+                PanelKind::MacroTimeline => PanelKind::Timeline,
                 _ => PanelKind::Project,
             };
             self.ui.dock.open_near(p, near);

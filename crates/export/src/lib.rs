@@ -378,6 +378,10 @@ pub struct ExportSettings {
     /// GPU rendering: Auto / Off, Off by default). Off = the CPU reference renderer exactly.
     #[serde(default)]
     pub gpu_rendering: GpuRendering,
+    /// Where RGB is converted to the encoder's YUV layout (Export ▸ Color conversion: Auto / CPU).
+    /// Auto converts on the GPU when the encoder can take NV12 (the fastest route).
+    #[serde(default)]
+    pub color_conversion: ColorConversion,
     /// VBR maximum bitrate (None = 1.5 × target).
     pub max_bitrate_kbps: Option<u32>,
     /// Adaptive bitrate (the Match Source presets): bits per pixel per frame; replaces
@@ -589,6 +593,7 @@ impl Default for ExportSettings {
             crf: DEFAULT_CRF,
             hardware_encoding: HardwareEncoding::default(),
             gpu_rendering: GpuRendering::Off,
+            color_conversion: ColorConversion::Auto,
             max_bitrate_kbps: None,
             adaptive_bitrate: None,
             keyframe_distance: None,
@@ -754,6 +759,12 @@ pub trait VideoEncoder: Send {
     fn sample_entry(&self) -> SampleEntry;
     fn timescale(&self) -> u32;
     fn encode(&mut self, frame: &EncoderFrame) -> Result<Vec<EncodedPacket>>;
+    /// Whether [`EncoderFrame::rgba`] may hold a ready BT.709 limited-range NV12 picture
+    /// (`width * height * 3 / 2` bytes) instead of RGBA8; such an encoder tells the two apart by
+    /// length. False for every encoder that only reads RGBA.
+    fn accepts_nv12(&self) -> bool {
+        false
+    }
     fn flush(&mut self) -> Result<Vec<EncodedPacket>>;
     /// Media start offset for an edit list (B-frame delay), in the encoder timescale.
     fn media_start(&self) -> Option<i64> {
@@ -935,6 +946,29 @@ pub trait FrameRenderer: Send {
         opts: filmcraft_render::RenderOptions,
         sources: &dyn SourceProvider,
     ) -> Option<filmcraft_render::Image>;
+
+    /// Whether this renderer supports rendering a pre-planned [`filmcraft_render::plan::FramePlan`]
+    /// decoded outside the renderer pool lock.
+    fn supports_plan(&self) -> bool {
+        false
+    }
+
+    /// Composite a pre-built [`filmcraft_render::plan::FramePlan`] into a linear-light [`filmcraft_render::Image`].
+    fn render_plan(&mut self, _plan: &filmcraft_render::plan::FramePlan) -> Option<filmcraft_render::Image> {
+        None
+    }
+
+    /// Composite a pre-built [`filmcraft_render::plan::FramePlan`] and resolve over black to sRGB RGBA8 on the GPU.
+    fn render_plan_rgba8(&mut self, _plan: &filmcraft_render::plan::FramePlan) -> Option<(u32, u32, Vec<u8>)> {
+        None
+    }
+
+    /// Composite a pre-built plan over black and convert it on the GPU to BT.709 limited-range
+    /// NV12 (`w * h` luma bytes, then `w * h / 2` interleaved CbCr), tightly packed. `None` when
+    /// this renderer or frame cannot (the caller then asks for RGBA8).
+    fn render_plan_nv12(&mut self, _plan: &filmcraft_render::plan::FramePlan) -> Option<(u32, u32, Vec<u8>)> {
+        None
+    }
 }
 
 /// Builds the frame renderer for one export, or `None` when this host cannot (no adapter).

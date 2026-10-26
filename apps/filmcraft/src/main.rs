@@ -131,8 +131,15 @@ fn main() -> eframe::Result {
     if graphics.mode() == graphics::Mode::Default {
         register_gpu_frame_renderer();
     }
+    #[cfg(target_os = "linux")]
+    let x11 = launch.x11 || std::env::var_os("FILMCRAFT_X11").is_some() || (std::env::var_os("FILMCRAFT_WAYLAND").is_none() && std::env::var_os("DISPLAY").is_some());
+    #[cfg(not(target_os = "linux"))]
+    let x11 = false;
+    if x11 {
+        log::info!("running via X11 / XWayland backend (file drag-and-drop enabled)");
+    }
     let started = loop {
-        let mut options = native_options(launch.control_port.is_some());
+        let mut options = native_options(launch.control_port.is_some(), x11);
         // Before eframe creates the wgpu instance (e.g. no OpenGL on Windows, see graphics.rs).
         graphics::apply(&mut options, graphics.mode(), backend_override);
         let app_created = Arc::new(AtomicBool::new(false));
@@ -165,7 +172,7 @@ fn main() -> eframe::Result {
 }
 
 /// The main window's options; built for each start attempt (they hold a one-shot hook).
-fn native_options(agent: bool) -> eframe::NativeOptions {
+fn native_options(agent: bool, x11: bool) -> eframe::NativeOptions {
     eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("FilmCraft")
@@ -180,7 +187,7 @@ fn native_options(agent: bool) -> eframe::NativeOptions {
             .with_icon(app_icon())
             // Wayland matches the window to `packaging/linux/ai.storyteller.filmcraft.desktop`.
             .with_app_id(APP_ID),
-        event_loop_builder: agent_event_loop(agent),
+        event_loop_builder: agent_event_loop(agent, x11),
         ..Default::default()
     }
 }
@@ -188,7 +195,7 @@ fn native_options(agent: bool) -> eframe::NativeOptions {
 /// Creates the app once eframe has its window and graphics device; sets `created` when it runs,
 /// and confirms the graphics mode once two frames have painted.
 fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<AtomicBool>) -> eframe::AppCreator<'static> {
-    let Launch { control_port, control_input_only, files, demo, startup_flag, recover, data_dir, graphics: _ } = launch;
+    let Launch { control_port, control_input_only, files, demo, startup_flag, recover, data_dir, graphics: _, x11: _ } = launch;
     Box::new(move |cc| {
         created.store(true, Ordering::Relaxed);
         // A fallback graphics mode says so in the window, with a button back to the default.
@@ -216,10 +223,12 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
         // voice-over recording reads the microphone through cpal
         session.voiceover.input = Some(Box::new(audio_in::CpalIn::new(&session.prefs.audio_hardware.device_class)));
         let (project, media) = args::project_and_media(&files);
-        if let Some(p) = project {
+        if let Some(ref p) = project {
             if let Err(e) = session.execute("file.open", json!({"path": p})) {
                 log::error!("{e}");
             }
+        } else if startup_flag && demo {
+            let _ = session.execute("file.openDemoProject", json!({}));
         } else if !startup_flag && session.prefs.general.at_startup == "openMostRecent" {
             // Settings ▸ General ▸ At Startup ▸ Open Most Recent
             let recent = session.prefs.general.recent_projects.iter().find(|p| std::path::Path::new(p).exists()).cloned();
@@ -234,6 +243,8 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
                 }
             }
         } else if !startup_flag && session.prefs.general.at_startup == "emptyProject" {
+        } else if !startup_flag && session.prefs.general.at_startup == "showHome" {
+            // DaVinci Resolve Project Manager / Home: do not load demo project
         } else if demo {
             let _ = session.execute("file.openDemoProject", json!({}));
         }
@@ -248,6 +259,9 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
             }
         }
         let mut app = FilmcraftApp::new(session);
+        if project.is_none() && media.is_empty() && !startup_flag && app.session.prefs.general.at_startup == "showHome" {
+            app.ui.mode = filmcraft_ui_egui::state::Mode::Import;
+        }
         app.graphics_notice = notice;
         if recover == Some(false) {
             app.dialog = None;
@@ -278,8 +292,11 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
                 .map(|p| p.to_string_lossy().to_string())
         }));
         app.hooks.pick_save = Some(Box::new(|name: &str| {
+            let storage = filmcraft_ui_egui::panels::project_manager::projects_storage_dir();
+            let _ = std::fs::create_dir_all(&storage);
             rfd::FileDialog::new()
                 .add_filter(filmcraft_ui_egui::i18n::t("FilmCraft Project"), &file_filters::extensions(&["fcproj"]))
+                .set_directory(&storage)
                 .set_file_name(name)
                 .save_file()
                 .map(|p| p.to_string_lossy().to_string())
@@ -327,8 +344,11 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
                 .map(|p| p.to_string_lossy().to_string())
         }));
         app.hooks.pick_open_project = Some(Box::new(|| {
+            let storage = filmcraft_ui_egui::panels::project_manager::projects_storage_dir();
+            let _ = std::fs::create_dir_all(&storage);
             rfd::FileDialog::new()
                 .add_filter(filmcraft_ui_egui::i18n::t("FilmCraft Project"), &file_filters::extensions(&["fcproj"]))
+                .set_directory(&storage)
                 .pick_file()
                 .map(|p| p.to_string_lossy().to_string())
         }));
@@ -403,6 +423,22 @@ impl filmcraft_export::FrameRenderer for GpuFrameRenderer {
     ) -> Option<filmcraft_render::Image> {
         self.0.render(project, seq, t, opts, sources)
     }
+
+    fn supports_plan(&self) -> bool {
+        true
+    }
+
+    fn render_plan(&mut self, plan: &filmcraft_render::plan::FramePlan) -> Option<filmcraft_render::Image> {
+        self.0.render_plan(plan)
+    }
+
+    fn render_plan_rgba8(&mut self, plan: &filmcraft_render::plan::FramePlan) -> Option<(u32, u32, Vec<u8>)> {
+        self.0.render_plan_rgba8(plan)
+    }
+
+    fn render_plan_nv12(&mut self, plan: &filmcraft_render::plan::FramePlan) -> Option<(u32, u32, Vec<u8>)> {
+        self.0.render_plan_nv12(plan)
+    }
 }
 
 fn register_gpu_frame_renderer() {
@@ -427,15 +463,25 @@ fn local_offset(unix: i64) -> i32 {
 
 /// Driven by an agent (`--control`): don't activate the app on launch, so the user's keyboard
 /// focus stays where it is (macOS; winit activates ignoring other apps by default).
-fn agent_event_loop(agent: bool) -> Option<eframe::EventLoopBuilderHook> {
+/// On Linux, `--x11` configures winit to run via X11/XWayland so drag-and-drop works reliably.
+fn agent_event_loop(agent: bool, x11: bool) -> Option<eframe::EventLoopBuilderHook> {
     #[cfg(target_os = "macos")]
     if agent {
+        let _ = x11;
         return Some(Box::new(|b| {
             use winit::platform::macos::EventLoopBuilderExtMacOS;
             b.with_activate_ignoring_other_apps(false);
         }));
     }
-    let _ = agent;
+    #[cfg(target_os = "linux")]
+    if x11 {
+        let _ = agent;
+        return Some(Box::new(|b| {
+            use winit::platform::x11::EventLoopBuilderExtX11;
+            b.with_x11();
+        }));
+    }
+    let _ = (agent, x11);
     None
 }
 

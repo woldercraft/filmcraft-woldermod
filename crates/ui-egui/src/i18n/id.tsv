@@ -326,7 +326,6 @@
 	Show Active Caption Tracks Only	Tampilkan Hanya Trek Takarir Aktif
 	Show All Caption Tracks	Tampilkan Semua Trek Takarir
 	Show All Marker Colors	Tampilkan Semua Warna Penanda
-	Show Duplicate Frame Markers	Tampilkan Penanda Bingkai Duplikat
 	Show Guides	Tampilkan Garis Bantu
 	Show Rulers	Tampilkan Penggaris
 	Show Through Edits	Tampilkan Edit Tembus
@@ -3583,3 +3582,16 @@
 	Open a sequence to search its graphics	Buka sekuens untuk mencari di grafisnya
 	No text graphics in this sequence. Add text with the Type tool.	Tidak ada grafis teks di sekuens ini. Tambahkan teks dengan alat Teks.
 	No matching text.	Tidak ada teks yang cocok.
+	Remove Silence…	Hapus Keheningan…
+	Remove Silence	Hapus Keheningan
+	Threshold:	Ambang batas:
+	Pre head:	Batas awal:
+	Post tail:	Batas akhir:
+	Minimum to strip:	Minimum keheningan dipotong:
+	Cross fade audio	Crossfade audio
+	Preview:	Pratinjau:
+	Visible area	Area yang terlihat
+	Entire clip	Seluruh klip
+	Entire sequence	Seluruh sekuens
+	{count} silences detected ({sec}s)	{count} keheningan terdeteksi ({sec}s)
+	Detecting silences…	Mendeteksi keheningan…
