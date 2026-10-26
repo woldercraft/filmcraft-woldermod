@@ -538,6 +538,9 @@ pub struct UiState {
     /// Audio Track Mixer ▸ Meter Input(s) Only: record-armed track meters show the recording input.
     #[serde(default)]
     pub mixer_meter_input_only: bool,
+    /// Audio Clip Mixer: whether controls affect the entire track or only the clip at the playhead.
+    #[serde(default)]
+    pub clip_mixer_target_track: bool,
     /// Audio Gain dialog draft (mode, dB values).
     #[serde(default)]
     pub audio_gain: AudioGainDraft,
@@ -1016,6 +1019,7 @@ impl Default for UiState {
             mixer_fx_open: false,
             mixer_hidden: Vec::new(),
             mixer_meter_input_only: false,
+            clip_mixer_target_track: false,
             settings: None,
             audio_gain: AudioGainDraft::default(),
             add_tracks: AddTracksDraft::default(),
