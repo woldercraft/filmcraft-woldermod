@@ -607,55 +607,14 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let duplicates = if app.session.state.show_duplicate_frame_markers { duplicate_markers(app, &ctx, seq_id, seq) } else { Arc::default() };
     update_silence_preview(app, &ctx, &layout, visible, seq_id);
     let sel_count = app.session.state.selection.len();
-    if sel_count < FAST_SELECTION_WARN_THRESHOLD {
-        app.tl.fast_mode_warned = false;
-        app.tl.fast_mode_prompt_dismissed = false;
-    }
-    if sel_count < FAST_SELECTION_LIMIT {
-        app.tl.fast_mode_auto_notified = false;
-    }
-    // If selecting in traditional mode and reaching the heavy threshold, halt and prompt
-    if !app.ui.timeline.fast_selection_mode
-        && !app.ui.timeline.fast_mode_prompt_never_show
-        && sel_count >= FAST_SELECTION_WARN_THRESHOLD
-        && !app.tl.fast_mode_prompt_dismissed
-        && app.tl.fast_mode_prompt.is_none()
-    {
-        if app.tl.drag.is_some() {
-            app.tl.drag = None;
-        }
-        app.tl.fast_mode_prompt = Some(sel_count);
-    }
-    if sel_count >= FAST_SELECTION_LIMIT && !app.tl.fast_mode_auto_notified {
-        app.tl.fast_mode_auto_notified = true;
-        app.tl.fast_mode_warned = true;
-        let msg = tlf!("Fast Selection Mode activated ({count} clips selected) — high-performance rendering enabled", count = sel_count);
-        app.ui.status = msg.clone();
-        app.toast = Some((msg, ctx.input(|i| i.time)));
-    } else if (FAST_SELECTION_WARN_THRESHOLD..FAST_SELECTION_LIMIT).contains(&sel_count)
-        && !app.tl.fast_mode_warned
-        && !app.ui.timeline.fast_selection_mode
-    {
-        app.tl.fast_mode_warned = true;
-        let msg = tlf!(
-            "Approaching selection limit ({count}/{limit} clips) — Fast Selection Mode will activate at {limit} clips",
-            count = sel_count,
-            limit = FAST_SELECTION_LIMIT
-        );
-        app.ui.status = msg.clone();
-        app.toast = Some((msg, ctx.input(|i| i.time)));
-    }
-    let dragging_many = matches!(&app.tl.drag, Some(Drag::Move { clips, .. }) if clips.len() >= FAST_SELECTION_WARN_THRESHOLD)
-        || (matches!(&app.tl.drag, Some(Drag::Marquee { .. })) && sel_count >= FAST_SELECTION_WARN_THRESHOLD);
-    let fast_mode = app.ui.timeline.fast_selection_mode
-        || sel_count >= FAST_SELECTION_LIMIT
-        || dragging_many
-        || app.tl.fast_mode_prompt.is_some()
-        || sel_count >= FAST_SELECTION_WARN_THRESHOLD;
+    let fast_mode = app.ui.timeline.fast_selection_mode;
+    let dragging_many = fast_mode
+        && (matches!(&app.tl.drag, Some(Drag::Move { .. }))
+            || matches!(&app.tl.drag, Some(Drag::Marquee { .. })));
 
     let total_seq_items: usize = seq.all_tracks().map(|t| t.items.len()).sum();
     let all_selected = sel_count > 0 && sel_count >= total_seq_items;
-    let is_fast_moving = matches!(&app.tl.drag, Some(Drag::Move { clips, .. }) if clips.len() >= FAST_SELECTION_WARN_THRESHOLD || app.ui.timeline.fast_selection_mode);
+    let is_fast_moving = fast_mode && matches!(&app.tl.drag, Some(Drag::Move { .. }));
 
     let selection: Arc<HashSet<ClipId>> = if all_selected {
         Arc::new(HashSet::new())
@@ -1071,8 +1030,8 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
 
     // ---- fast selection / high-performance mode banner
-    if fast_mode || sel_count >= FAST_SELECTION_WARN_THRESHOLD {
-        draw_fast_selection_banner(app, ui, &painter, tracks_area, sel_count, fast_mode, &t);
+    if fast_mode {
+        draw_fast_selection_banner(app, ui, &painter, tracks_area, sel_count, &t);
     }
     if let Some(count) = app.tl.fast_mode_prompt {
         show_fast_mode_prompt_dialog(app, &ctx, count);
@@ -1625,24 +1584,16 @@ fn draw_fast_selection_banner(
     painter: &egui::Painter,
     tracks_area: Rect,
     sel_count: usize,
-    fast_mode: bool,
     t: &Tokens,
 ) {
-    let (text, bg, border, icon_color) = if fast_mode {
-        let txt = if sel_count > 0 {
-            tlf!("Fast Selection Mode active ({count} clips)", count = sel_count)
-        } else {
-            tl!("Fast Selection Mode active").to_string()
-        };
-        (txt, Color32::from_rgba_premultiplied(40, 36, 20, 225), Color32::from_rgb(220, 175, 45), Color32::from_rgb(245, 195, 55))
+    let text = if sel_count > 0 {
+        tlf!("Fast Selection Mode active ({count} clips)", count = sel_count)
     } else {
-        let txt = tlf!(
-            "Approaching limit ({count}/{limit} clips) — click for Fast Selection Mode",
-            count = sel_count,
-            limit = FAST_SELECTION_LIMIT
-        );
-        (txt, Color32::from_rgba_premultiplied(45, 30, 20, 225), Color32::from_rgb(230, 130, 40), Color32::from_rgb(250, 150, 50))
+        tl!("Fast Selection Mode active").to_string()
     };
+    let bg = Color32::from_rgba_premultiplied(40, 36, 20, 225);
+    let border = Color32::from_rgb(220, 175, 45);
+    let icon_color = Color32::from_rgb(245, 195, 55);
 
     let font = Tokens::semibold(11.0);
     let galley = ui.painter().layout_no_wrap(text.clone(), font, t.text);
@@ -2803,7 +2754,7 @@ fn preview_drag(app: &FilmcraftApp, seq: &Sequence, out: &mut HashMap<ClipId, (T
     match d {
         Drag::Move { new_track: Some(_), .. } => {}
         Drag::Move { clips, offset, track_delta, .. } => {
-            if clips.len() >= FAST_SELECTION_WARN_THRESHOLD || app.ui.timeline.fast_selection_mode {
+            if app.ui.timeline.fast_selection_mode {
                 // In ultra-lightweight drag mode, bypass populating the HashMap.
                 // The ghost overlay renders directly without any hash map lookups.
             } else if clips.len() > 16 {
@@ -3677,7 +3628,7 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
             Drag::Move { clips, grab_tick, start_track, bounds, all_unlocked, base_offset, base_track_delta, .. } => {
                 let raw = rate.snap_nearest(t_here - grab_tick) + base_offset;
                 let (first, last) = bounds;
-                let offset = if clips.len() >= FAST_SELECTION_WARN_THRESHOLD || app.ui.timeline.fast_selection_mode {
+                let offset = if app.ui.timeline.fast_selection_mode {
                     raw.max(-first)
                 } else {
                     let s1 = snap(app, seq, layout, first + raw, &clips) - first;
@@ -3690,7 +3641,7 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
                     (Some(c), Some(s)) if c.kind == s.kind => c.index as i32 - s.index as i32 + base_track_delta,
                     _ => base_track_delta,
                 };
-                if clips.len() < FAST_SELECTION_WARN_THRESHOLD && !app.ui.timeline.fast_selection_mode && (track_delta != 0 || !all_unlocked) && move_is_locked(seq, &clips, track_delta) {
+                if !app.ui.timeline.fast_selection_mode && (track_delta != 0 || !all_unlocked) && move_is_locked(seq, &clips, track_delta) {
                     ctx.set_cursor_icon(CursorIcon::NotAllowed);
                     Some(Drag::Move { clips, grab_tick, start_track, offset: Tick::ZERO, track_delta: 0, new_track: None, copy: mods.alt, bounds, all_unlocked, base_offset, base_track_delta })
                 } else {
@@ -3769,20 +3720,12 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
                 // the clips in the box are selected as it grows and shrinks; only the release runs
                 // the command, so the drag is one selection change
                 let clips = marquee_clips(seq, layout, r);
-                let count = clips.len() + if add { before.len() } else { 0 };
-                if !app.ui.timeline.fast_selection_mode
-                    && !app.ui.timeline.fast_mode_prompt_never_show
-                    && count >= FAST_SELECTION_WARN_THRESHOLD
-                    && !app.tl.fast_mode_prompt_dismissed
-                {
-                    app.tl.fast_mode_prompt = Some(count);
-                    None
-                } else if app.ui.timeline.fast_selection_mode {
+                if app.ui.timeline.fast_selection_mode {
                     // In fast selection mode, marquee selection is visual-only during dragging.
                     // The actual selection will be committed on mouse release.
                     Some(Drag::Marquee { start, start_tick, before, add, individual })
                 } else {
-                    let clips = if individual || count >= FAST_SELECTION_WARN_THRESHOLD {
+                    let clips = if individual {
                         clips
                     } else {
                         filmcraft_engine::commands::with_links(&app.session, &clips)
@@ -3827,7 +3770,7 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
         if !cancelled && let Some(d) = app.tl.drag.take() {
             let r = match d {
                 Drag::Move { clips, offset, track_delta, new_track, copy, bounds, all_unlocked, .. } if offset != Tick::ZERO || track_delta != 0 || new_track.is_some() => {
-                    if app.ui.timeline.fast_selection_mode || clips.len() >= FAST_SELECTION_WARN_THRESHOLD {
+                    if app.ui.timeline.fast_selection_mode {
                         app.tl.pending_move = Some(PendingMove {
                             clips: clips.clone(),
                             offset,
@@ -4741,6 +4684,16 @@ mod fast_selection_tests {
         let seq_after = app.session.active_sequence().expect("seq");
         let (_, it_after) = seq_after.find_item(clip_id).expect("found");
         assert_eq!(it_after.start, orig_start + Tick::from_seconds_f64(2.0));
+        assert!(app.tl.pending_move.is_none());
+    }
+
+    #[test]
+    fn fast_mode_disabled_never_creates_pending_move() {
+        let mut session = Session::default();
+        session.execute("file.openDemoProject", json!({})).expect("demo project");
+        let mut app = FilmcraftApp::new(session);
+        app.ui.timeline.fast_selection_mode = false;
+        assert!(!app.ui.timeline.fast_selection_mode);
         assert!(app.tl.pending_move.is_none());
     }
 }
