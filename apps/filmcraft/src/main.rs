@@ -130,7 +130,13 @@ fn main() -> eframe::Result {
     if graphics.mode() == graphics::Mode::Default {
         register_gpu_frame_renderer();
     }
-    let x11 = launch.x11 || std::env::var_os("FILMCRAFT_X11").is_some();
+    #[cfg(target_os = "linux")]
+    let x11 = launch.x11 || std::env::var_os("FILMCRAFT_X11").is_some() || (std::env::var_os("FILMCRAFT_WAYLAND").is_none() && std::env::var_os("DISPLAY").is_some());
+    #[cfg(not(target_os = "linux"))]
+    let x11 = false;
+    if x11 {
+        log::info!("running via X11 / XWayland backend (file drag-and-drop enabled)");
+    }
     let started = loop {
         let mut options = native_options(launch.control_port.is_some(), x11);
         // Before eframe creates the wgpu instance (e.g. no OpenGL on Windows, see graphics.rs).
