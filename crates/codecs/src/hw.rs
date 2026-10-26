@@ -181,7 +181,49 @@ impl StreamInfo {
                 let mut checked = HashSet::new();
                 i.nals(sample).into_iter().any(|n| {
                     let n = without_trailing_zeros(n);
-                    n.first().is_some_and(|&h| i.is_parameter_set(i.nal_type(h))) && checked.insert(n) && !configured.contains(n)
+                    let Some(&h) = n.first() else { return false };
+                    if !i.is_parameter_set(i.nal_type(h)) || !checked.insert(n) || configured.contains(n) {
+                        return false;
+                    }
+                    // When byte 0 matches, check if the picture format actually changed (encoders like
+                    // x264/FFmpeg write provisional VUI timing info in avcC that differs from in-band SPS):
+                    if i.codec == NalCodec::H264 {
+                        if i.nal_type(h) == 7 && i.parameter_sets.iter().any(|p| p.first() == Some(&h)) {
+                            if let Ok(sps) = filmcraft_h264::params::Sps::parse(&filmcraft_bitstream::unescape_rbsp(n.get(1..).unwrap_or_default())) {
+                                if (sps.width(), sps.height()) == i.coded
+                                    && sps.crop_rect() == i.crop
+                                    && sps.chroma_format_idc == i.chroma_format_idc
+                                    && sps.bit_depth_luma == i.bit_depth_luma
+                                    && sps.bit_depth_chroma == i.bit_depth_chroma
+                                    && !sps.frame_mbs_only == i.interlaced
+                                    && sps.profile_idc == i.profile_idc
+                                {
+                                    return false;
+                                }
+                            }
+                        } else if i.nal_type(h) == 8 {
+                            // PPS never changes the hardware decoder picture format / session parameters
+                            return false;
+                        }
+                    } else if i.codec == NalCodec::Hevc {
+                        if i.nal_type(h) == 33 && i.parameter_sets.iter().any(|p| p.first() == Some(&h)) {
+                            if let Ok(sps) = filmcraft_hevc::params::Sps::parse(&filmcraft_bitstream::unescape_rbsp(n.get(2..).unwrap_or_default())) {
+                                if (sps.width, sps.height) == i.coded
+                                    && sps.crop_rect() == i.crop
+                                    && sps.chroma_format_idc == i.chroma_format_idc
+                                    && sps.bit_depth_luma == i.bit_depth_luma
+                                    && sps.bit_depth_chroma == i.bit_depth_chroma
+                                    && sps.ptl.profile_idc == i.profile_idc
+                                {
+                                    return false;
+                                }
+                            }
+                        } else if matches!(i.nal_type(h), 32 | 34) {
+                            // VPS and PPS never change the picture format / session parameters
+                            return false;
+                        }
+                    }
+                    true
                 })
             }
             Self::Frame(i) => i.parameters_changed(sample),
