@@ -155,13 +155,18 @@ fn cmd_wheel_moves_the_timeline_sideways_and_option_wheel_zooms() {
     assert_eq!((v, a), (0.0, 0.0));
     d.wheel(0.2, 0.0, -20.0, json!({"alt": true}));
     assert!((d.view().1 - 48.0).abs() < 1e-6, "and out again");
-    // a sideways gesture (trackpad swipe, tilt wheel) is sideways whatever is held; so is Shift
+    // a sideways gesture (trackpad swipe, tilt wheel) is sideways
     d.ok("ui.set", json!({"timeline": {"pps": 50.0, "scroll": 4.0}}));
     d.frames(3);
     d.wheel(0.2, -50.0, 5.0, none());
     assert_eq!(d.view(), (5.0, 50.0, 0.0, 0.0));
-    d.wheel(0.2, 0.0, -50.0, json!({"shift": true}));
-    assert_eq!(d.view(), (6.0, 50.0, 0.0, 0.0));
+    // Shift + Wheel over video tracks (fy: 0.2) and audio tracks (fy: 0.8) changes track height (DaVinci Resolve style)
+    let initial_vh = d.app().ui.timeline.video_track_h;
+    d.wheel(0.2, 0.0, 40.0, json!({"shift": true}));
+    assert_eq!(d.app().ui.timeline.video_track_h, initial_vh + 6.0);
+    let initial_ah = d.app().ui.timeline.audio_track_h;
+    d.wheel(0.8, 0.0, 40.0, json!({"shift": true}));
+    assert_eq!(d.app().ui.timeline.audio_track_h, initial_ah + 6.0);
 }
 
 /// Settings ▸ Timeline ▸ Timeline Mouse Scrolling "Horizontal": the wheel moves the Timeline

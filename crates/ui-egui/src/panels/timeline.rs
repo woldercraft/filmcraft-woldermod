@@ -3325,11 +3325,22 @@ fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
             let v = &mut app.ui.timeline;
             v.target_pps = (v.target_pps * f).clamp(0.05, 24_000.0);
             app.tl.zoom_anchor = Some((anchor_t, p.x));
+        } else if w.shift && (w.delta.y != 0.0 || w.delta.x != 0.0) {
+            // DaVinci Resolve behavior: Shift + Wheel changes video / audio track height
+            let dy = if w.delta.y != 0.0 { w.delta.y } else { w.delta.x };
+            let d = dy * 0.15;
+            if p.y < layout.split_y {
+                let h = &mut app.ui.timeline.video_track_h;
+                *h = (*h + d).clamp(22.0, 220.0);
+            } else {
+                let h = &mut app.ui.timeline.audio_track_h;
+                *h = (*h + d).clamp(22.0, 220.0);
+            }
         } else if w.delta != egui::Vec2::ZERO {
             let wheel_sideways = (app.session.prefs.timeline.mouse_scrolling == "horizontal") != w.command;
             let sideways = if w.delta.x.abs() > w.delta.y.abs() {
                 Some(w.delta.x)
-            } else if wheel_sideways || w.shift {
+            } else if wheel_sideways {
                 Some(w.delta.y)
             } else {
                 None
