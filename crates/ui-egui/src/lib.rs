@@ -1917,14 +1917,6 @@ impl FilmcraftApp {
             }
         }
 
-        // Left side: status / hint text
-        let hint = if !self.ui.status.is_empty() { self.ui.status.clone() } else { self.hint_text() };
-        ui.painter().text(egui::pos2(sb.min.x + 10.0, sb.center().y), egui::Align2::LEFT_CENTER, hint, Tokens::ui(11.0), t.text_dim);
-        let resp = ui.interact(sb, egui::Id::new("status-bar"), egui::Sense::click());
-        if resp.clicked() {
-            self.ui.status.clear();
-        }
-
         // Center: DaVinci Resolve bottom page navigation (Proyectos, Edición, Exportación)
         let nav_items = [
             (state::Mode::Import, "Projects", tl!("Projects"), icons::Icon::Folder),
@@ -1933,6 +1925,19 @@ impl FilmcraftApp {
         ];
         let total_tabs_w = nav_items.len() as f32 * 110.0;
         let mut tab_x = (sb.center().x - total_tabs_w / 2.0).max(sb.min.x + 200.0);
+        let start_tab_x = tab_x;
+
+        // Left side: transient status / error notifications only (no persistent tool hints)
+        if !self.ui.status.is_empty() {
+            let max_w = (start_tab_x - sb.min.x - 20.0).max(100.0);
+            let galley = ui.painter().layout(self.ui.status.clone(), Tokens::ui(11.0), t.text_dim, max_w);
+            let status_rect = egui::Rect::from_min_size(egui::pos2(sb.min.x + 10.0, sb.center().y - galley.size().y / 2.0), galley.size());
+            ui.painter().galley_with_override_text_color(status_rect.min, galley, t.text_dim);
+            let resp = ui.interact(status_rect, egui::Id::new("status-bar-text"), egui::Sense::click());
+            if resp.clicked() {
+                self.ui.status.clear();
+            }
+        }
         for (m, id, label, icon) in nav_items {
             let active = self.ui.mode == m;
             let tab_r = egui::Rect::from_min_size(egui::pos2(tab_x, sb.min.y + 2.0), egui::vec2(104.0, sb.height() - 4.0));
@@ -2025,6 +2030,7 @@ impl FilmcraftApp {
     }
 
     /// Contextual hint for the status bar (Premiere shows tool/gesture hints here).
+    #[allow(dead_code)]
     fn hint_text(&self) -> String {
         let mac = cfg!(target_os = "macos");
         match self.ui.tool {
