@@ -510,6 +510,12 @@ pub struct UiState {
     /// Freely movable positions for color nodes in graph (`clip:node_index` -> [x, y] relative to canvas).
     #[serde(default)]
     pub color_node_positions: std::collections::HashMap<String, [f32; 2]>,
+    /// Pan offset for ColorNodes graph canvas [x, y].
+    #[serde(default)]
+    pub color_node_pan: [f32; 2],
+    /// Zoom level for ColorNodes graph canvas (1.0 = 100%).
+    #[serde(default = "default_node_zoom")]
+    pub color_node_zoom: f32,
     /// Text to Speech panel: the script and voice settings being written or edited.
     #[serde(default)]
     pub tts: crate::panels::tts::TtsDraft,
@@ -982,6 +988,10 @@ fn captions_tab() -> String {
     "Captions".into()
 }
 
+fn default_node_zoom() -> f32 {
+    1.0
+}
+
 fn yes() -> bool {
     true
 }
@@ -1020,6 +1030,8 @@ impl Default for UiState {
             active_color_node: 0,
             color_node_labels: std::collections::HashMap::new(),
             color_node_positions: std::collections::HashMap::new(),
+            color_node_pan: [0.0, 0.0],
+            color_node_zoom: 1.0,
             tts: Default::default(),
             export: Default::default(),
             project_browser: Default::default(),

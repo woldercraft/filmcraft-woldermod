@@ -83,35 +83,39 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         });
     });
 
-    // DaVinci Resolve-style Node switcher bar: [ Node 01 ✓ ] [ Node 02 ] [ + ]
+    // DaVinci Resolve-style Node switcher bar: [ Node: ] [ + ] | [ Node 01 ✓ ] [ Node 02 ] ...
     bui.horizontal(|ui| {
         ui.label(egui::RichText::new(tl!("Node:")).color(t.text_dim).small());
-        for (n_idx, &(_fx_i, fx_inst)) in lumetri_effects.iter().enumerate() {
-            let is_curr = n_idx == active_node;
-            let node_num = format!("{:02}", n_idx + 1);
-            let custom_name = app.ui.color_node_labels.get(&format!("{}:{n_idx}", clip.0)).cloned();
-            let label = custom_name.unwrap_or_else(|| format!("Node {node_num}"));
-            let text = if fx_inst.enabled {
-                format!("{label} ✓")
-            } else {
-                format!("{label} ✗")
-            };
-            let mut btn = egui::Button::new(egui::RichText::new(text).small());
-            if is_curr {
-                btn = btn.fill(t.accent.gamma_multiply(0.25)).stroke(egui::Stroke::new(1.0, t.accent));
-            }
-            let resp = ui.add(btn);
-            app.auto.add(&format!("lumetri.node.{n_idx}"), resp.rect, &label);
-            if resp.clicked() {
-                app.ui.active_color_node = n_idx;
-            }
-        }
         let add_btn = ui.button(egui::RichText::new("+").small()).on_hover_text(tl!("Add Serial Node (Alt+S)"));
         app.auto.add("lumetri.node.add", add_btn.rect, "Add Serial Node");
         if add_btn.clicked() {
             let _ = app.session.execute("effects.apply", json!({"clips": [clip.0], "effect": "lumetri"}));
             app.ui.active_color_node = lumetri_effects.len();
         }
+        egui::ScrollArea::horizontal().auto_shrink([false, true]).max_height(26.0).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                for (n_idx, &(_fx_i, fx_inst)) in lumetri_effects.iter().enumerate() {
+                    let is_curr = n_idx == active_node;
+                    let node_num = format!("{:02}", n_idx + 1);
+                    let custom_name = app.ui.color_node_labels.get(&format!("{}:{n_idx}", clip.0)).cloned();
+                    let label = custom_name.unwrap_or_else(|| format!("Node {node_num}"));
+                    let text = if fx_inst.enabled {
+                        format!("{label} ✓")
+                    } else {
+                        format!("{label} ✗")
+                    };
+                    let mut btn = egui::Button::new(egui::RichText::new(text).small());
+                    if is_curr {
+                        btn = btn.fill(t.accent.gamma_multiply(0.25)).stroke(egui::Stroke::new(1.0, t.accent));
+                    }
+                    let resp = ui.add(btn);
+                    app.auto.add(&format!("lumetri.node.{n_idx}"), resp.rect, &label);
+                    if resp.clicked() {
+                        app.ui.active_color_node = n_idx;
+                    }
+                }
+            });
+        });
     });
 
     // DaVinci Resolve Palette Tool Bar: [ ⬡ Primarias ] [ ◎ Ruedas ] [ ∿ Curvas ] [ ⬚ Máscara ] [ ✑ Cualificador ] [ 🎞 Creative ] [ ◐ Viñeta ]

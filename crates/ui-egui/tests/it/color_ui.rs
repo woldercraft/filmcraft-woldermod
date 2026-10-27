@@ -548,3 +548,52 @@ fn davinci_resolve_color_page_layout_and_power_windows() {
     let masks = mask_list["masks"].as_array().unwrap();
     assert_eq!(masks.len(), 2, "Linear power window created on color node");
 }
+
+#[test]
+fn color_nodes_pan_zoom_and_multi_row() {
+    let mut d = Driver::demo();
+    d.ok("ui.set", json!({"workspace": "Color"}));
+    d.frames(4);
+    let _clip = select_first_clip(&mut d);
+
+    // Initial node
+    d.click("color_nodes.init_node");
+    d.frames(2);
+
+    // Add 11 more nodes (total 12 nodes)
+    for _ in 0..11 {
+        d.click("color_nodes.add_serial");
+        d.frames(1);
+    }
+    d.frames(3);
+
+    // Verify nodes exist
+    let ids = d.ids("color_nodes.node.");
+    assert!(ids.iter().any(|i| i == "color_nodes.node.11"), "all 12 nodes present: {ids:?}");
+
+    // Check zoom controls exist
+    assert!(d.element("color_nodes.fit").is_some(), "fit button exists");
+    assert!(d.element("color_nodes.zoom_out").is_some(), "zoom_out button exists");
+    assert!(d.element("color_nodes.zoom_reset").is_some(), "zoom_reset button exists");
+    assert!(d.element("color_nodes.zoom_in").is_some(), "zoom_in button exists");
+
+    // Click zoom out
+    let initial_zoom = d.app().ui.color_node_zoom;
+    d.click("color_nodes.zoom_out");
+    d.frames(2);
+    assert!(d.app().ui.color_node_zoom < initial_zoom, "zoom decreased");
+
+    // Click zoom reset
+    d.click("color_nodes.zoom_reset");
+    d.frames(2);
+    assert_eq!(d.app().ui.color_node_zoom, 1.0, "zoom reset to 1.0");
+
+    // Click fit to view
+    d.click("color_nodes.fit");
+    d.frames(2);
+    assert!(d.app().ui.color_node_zoom <= 1.0, "fit adjusted zoom appropriately");
+
+    // Check Lumetri node switcher: + button is still visible and clickable even with 12 nodes
+    assert!(d.element("lumetri.node.add").is_some(), "lumetri.node.add stays visible");
+    assert!(d.element("lumetri.node.0").is_some(), "lumetri.node.0 visible");
+}
