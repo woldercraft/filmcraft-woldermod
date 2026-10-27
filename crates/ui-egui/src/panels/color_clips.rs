@@ -111,7 +111,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // Scrollable horizontal clips strip
     let strip_rect = Rect::from_min_max(pos2(rect.min.x, rect.min.y + header_h), rect.max);
     let card_w = 124.0;
-    let card_h = (strip_rect.height() - 8.0).max(56.0);
+    let card_h = (strip_rect.height() - 6.0).clamp(36.0, 70.0);
 
     let playhead = app.session.playhead();
 

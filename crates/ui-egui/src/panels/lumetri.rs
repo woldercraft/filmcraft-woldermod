@@ -113,10 +113,44 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             app.ui.active_color_node = lumetri_effects.len();
         }
     });
+
+    // DaVinci Resolve Palette Tool Bar: [ ⬡ Primarias ] [ ◎ Ruedas ] [ ∿ Curvas ] [ ⬚ Máscara ] [ ✑ Cualificador ] [ 🎞 Creative ] [ ◐ Viñeta ]
+    bui.horizontal(|ui| {
+        let tools: [(&str, &str, &str); 7] = [
+            ("Basic Correction", "⬡ Primarias", tl!("Ajustes primarios y perillas")),
+            ("Color Wheels & Match", "◎ Ruedas & Match", tl!("Ruedas de color Lift/Gamma/Gain y Color Match")),
+            ("Curves", "∿ Curvas", tl!("Curvas RGB y curvas de matiz/saturación")),
+            ("Power Windows / Máscara", "⬚ Máscara", tl!("Power Windows y máscaras")),
+            ("HSL Secondary", "✑ Cualificador", tl!("Cualificador HSL secundario")),
+            ("Creative", "🎞 Creative & LUTs", tl!("Looks, LUTs creativos e intensidad")),
+            ("Vignette", "◐ Viñeta", tl!("Ajustes de viñeta")),
+        ];
+
+        for (sec_name, label, tooltip) in tools {
+            let key = format!("lumetri2:{sec_name}");
+            let is_open = !app.ui.collapsed_fx.contains(&key) && (sec_name == "Basic Correction" || app.ui.expanded_fx.contains(&key));
+            let mut btn = egui::Button::new(egui::RichText::new(label).small());
+            if is_open {
+                btn = btn.fill(t.accent.gamma_multiply(0.20)).stroke(Stroke::new(1.0, t.accent));
+            }
+            let resp = ui.add(btn).on_hover_text(tooltip);
+            if resp.clicked() {
+                if is_open {
+                    app.ui.collapsed_fx.push(key.clone());
+                    app.ui.expanded_fx.retain(|k| k != &key);
+                } else {
+                    app.ui.collapsed_fx.retain(|k| k != &key);
+                    app.ui.expanded_fx.push(key.clone());
+                }
+            }
+        }
+    });
+
     bui.add_space(2.0);
     let set = |actions: &mut Actions, param: &str, v: Value| actions.push(json!({"clip": clip.0, "effect": idx, "param": param, "value": v}));
     let mut sections: Vec<&'static str> = Vec::new();
     let mut lut_actions: Vec<(&'static str, Value)> = Vec::new();
+    let mut mask_actions: Vec<(String, Value)> = Vec::new();
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(&mut bui, |ui| {
         if open_section(ui, app, &e, "Basic Correction", "basic_on", "basic", &mut sections) {
             lut_combo(ui, app, &e, "input_lut", tl!("Input LUT"), true, &mut lut_actions);
@@ -273,7 +307,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             }
         }
         if open_section(ui, app, &e, "Color Wheels & Match", "wheels_on", "wheels", &mut sections) {
-            let w = ((ui.available_width() - 24.0) / 3.0).min(115.0);
+            let w = ((ui.available_width() - 320.0) / 3.0).clamp(80.0, 110.0);
             ui.horizontal(|ui| {
                 for (id, lid, label) in [
                     ("wheel_shadows", "wheel_shadows_l", tl!("Shadows")),
@@ -281,12 +315,126 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     ("wheel_highlights", "wheel_highlights_l", tl!("Highlights")),
                 ] {
                     ui.vertical(|ui| {
-                        ui.label(egui::RichText::new(label).color(t.text_dim));
+                        ui.label(egui::RichText::new(label).color(t.text_dim).small());
                         color_wheel(ui, &e, mt, id, lid, w, &t, &mut actions, clip, idx);
                     });
                 }
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(8.0);
+                ui.vertical(|ui| {
+                    match_controls(ui, app, &mut lut_actions);
+                });
             });
-            match_controls(ui, app, &mut lut_actions);
+        }
+        if open_section(ui, app, &e, "Power Windows / Máscara", "masks_on", "masks", &mut sections) {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(tl!("Herramientas:")).color(t.text_dim).small());
+                let pen_on = app.ui.mask_pen.as_ref().is_some_and(|p| p.clip == clip.0 && p.effect == idx);
+
+                // Linear / Rectangle Window
+                let rect_btn = ui.button(egui::RichText::new("⬚ Linear").small()).on_hover_text(tl!("Añadir máscara rectangular (Linear Window)"));
+                app.auto.add("lumetri.mask.add_linear", rect_btn.rect, "Añadir Linear Window");
+                if rect_btn.clicked() {
+                    mask_actions.push(("masks.add".into(), json!({"clip": clip.0, "effect": idx, "shape": "polygon"})));
+                }
+
+                // Circle / Ellipse Window
+                let circle_btn = ui.button(egui::RichText::new("◯ Círculo").small()).on_hover_text(tl!("Añadir máscara circular (Circle Window)"));
+                app.auto.add("lumetri.mask.add_circle", circle_btn.rect, "Añadir Circle Window");
+                if circle_btn.clicked() {
+                    mask_actions.push(("masks.add".into(), json!({"clip": clip.0, "effect": idx, "shape": "ellipse"})));
+                }
+
+                // Pen / Free-draw Curve Window
+                let mut pen_btn = egui::Button::new(egui::RichText::new("✑ Pluma").small());
+                if pen_on {
+                    pen_btn = pen_btn.fill(t.accent.gamma_multiply(0.25)).stroke(egui::Stroke::new(1.0, t.accent));
+                }
+                let pen_resp = ui.add(pen_btn).on_hover_text(tl!("Dibujo libre de curvas Bézier en monitor"));
+                app.auto.add("lumetri.mask.add_pen", pen_resp.rect, "Dibujar Máscara con Pluma");
+                if pen_resp.clicked() {
+                    app.ui.mask_pen = if pen_on { None } else { Some(crate::state::MaskPenDraft { clip: clip.0, effect: idx, points: vec![] }) };
+                    if !pen_on {
+                        app.ui.status = tl!("Haz clic en el monitor para trazar la máscara; haz clic en el primer punto para cerrar").into();
+                    }
+                }
+            });
+
+            if e.masks.is_empty() {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(tl!("Sin máscaras en este nodo. Haz clic en Linear, Círculo o Pluma para crear una.")).color(t.text_dim).small());
+            } else {
+                let sel_mask_idx = app.session.state.selected_mask
+                    .filter(|s| s.clip == clip && s.effect == idx)
+                    .map(|s| s.mask.min(e.masks.len() - 1))
+                    .unwrap_or(0);
+
+                let m = &e.masks[sel_mask_idx];
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(tl!("Ventana:")).color(t.text_dim).small());
+                    let mut chosen_mask = sel_mask_idx;
+                    egui::ComboBox::from_id_salt("lumetri_mask_select")
+                        .selected_text(format!("{} ({})", m.name, sel_mask_idx + 1))
+                        .show_ui(ui, |ui| {
+                            for (mi, mk) in e.masks.iter().enumerate() {
+                                if ui.selectable_value(&mut chosen_mask, mi, format!("{} ({})", mk.name, mi + 1)).clicked() {
+                                    mask_actions.push(("masks.select".into(), json!({"clip": clip.0, "effect": idx, "mask": mi})));
+                                }
+                            }
+                        });
+
+                    // Invert button
+                    let mut inv = m.inverted;
+                    if ui.selectable_label(inv, tl!("Invertir")).on_hover_text(tl!("Invertir máscara")).clicked() {
+                        inv = !inv;
+                        mask_actions.push(("masks.set".into(), json!({"clip": clip.0, "effect": idx, "mask": sel_mask_idx, "inverted": inv})));
+                    }
+
+                    // Delete button
+                    if ui.button(egui::RichText::new("🗑").color(Color32::from_rgb(240, 100, 100))).on_hover_text(tl!("Eliminar máscara")).clicked() {
+                        mask_actions.push(("masks.remove".into(), json!({"clip": clip.0, "effect": idx, "mask": sel_mask_idx})));
+                    }
+                });
+
+                // Mask sliders: Feather, Opacity, Expansion
+                let cur_feather = m.feather.f64_at(mt);
+                let cur_opacity = m.opacity.f64_at(mt);
+                let cur_expansion = m.expansion.f64_at(mt);
+
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(tl!("Calado:")).small());
+                    let mut f_val = cur_feather;
+                    if ui.add(egui::DragValue::new(&mut f_val).range(0.0..=500.0).speed(0.5).suffix(" px")).changed() {
+                        mask_actions.push(("masks.set".into(), json!({"clip": clip.0, "effect": idx, "mask": sel_mask_idx, "feather": f_val})));
+                    }
+
+                    ui.label(egui::RichText::new(tl!("Opacidad:")).small());
+                    let mut op_val = cur_opacity;
+                    if ui.add(egui::DragValue::new(&mut op_val).range(0.0..=100.0).speed(0.5).suffix(" %")).changed() {
+                        mask_actions.push(("masks.set".into(), json!({"clip": clip.0, "effect": idx, "mask": sel_mask_idx, "opacity": op_val})));
+                    }
+
+                    ui.label(egui::RichText::new(tl!("Expansión:")).small());
+                    let mut exp_val = cur_expansion;
+                    if ui.add(egui::DragValue::new(&mut exp_val).range(-200.0..=200.0).speed(0.5).suffix(" px")).changed() {
+                        mask_actions.push(("masks.set".into(), json!({"clip": clip.0, "effect": idx, "mask": sel_mask_idx, "expansion": exp_val})));
+                    }
+                });
+
+                // Quick Mask Tracking (Resolve style)
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(tl!("Tracker:")).color(t.text_dim).small());
+                    if ui.button(tl!("◀ Track Atrás")).clicked() {
+                        mask_actions.push(("masks.select".into(), json!({"clip": clip.0, "effect": idx, "mask": sel_mask_idx})));
+                        mask_actions.push(("masks.track".into(), json!({"clip": clip.0, "effect": idx, "mask": sel_mask_idx, "direction": "backward"})));
+                    }
+                    if ui.button(tl!("Track Adelante ▶")).clicked() {
+                        mask_actions.push(("masks.select".into(), json!({"clip": clip.0, "effect": idx, "mask": sel_mask_idx})));
+                        mask_actions.push(("masks.track".into(), json!({"clip": clip.0, "effect": idx, "mask": sel_mask_idx, "direction": "forward"})));
+                    }
+                });
+            }
         }
         if open_section(ui, app, &e, "HSL Secondary", "hsl_on", "hsl", &mut sections) {
             sub(ui, &t, tl!("Key"));
@@ -375,6 +523,11 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             app.ui.status = err.to_string();
         }
     }
+    for (cmd, val) in mask_actions {
+        if let Err(err) = app.session.execute(&cmd, val) {
+            app.ui.status = err.to_string();
+        }
+    }
 }
 
 fn open_section(
@@ -439,7 +592,7 @@ fn section(ui: &mut egui::Ui, app: &mut FilmcraftApp, name: &str, on: bool) -> (
     let key = format!("lumetri2:{name}");
     let open = !app.ui.collapsed_fx.contains(&key) && (name == "Basic Correction" || app.ui.expanded_fx.contains(&key));
     ui.add_space(2.0);
-    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click());
+    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
     ui.painter().line_segment([r.left_top(), r.right_top()], Stroke::new(1.0, t.separator));
     icons::paint(
         ui.painter(),
@@ -455,6 +608,12 @@ fn section(ui: &mut egui::Ui, app: &mut FilmcraftApp, name: &str, on: bool) -> (
     ui.painter().circle_filled(pos2(if on { sw.max.x - 7.0 } else { sw.min.x + 7.0 }, sw.center().y), 5.0, Color32::WHITE);
     app.auto.add(&format!("lumetri.switch.{name}"), sw.expand(3.0), &format!("{name} on/off"));
     app.auto.add(&format!("lumetri.section.{name}"), r, name);
+    if name.contains("Power Windows") {
+        app.auto.add("lumetri.section.Power Windows", r, "Power Windows");
+        app.auto.add("lumetri.section.Masks", r, "Masks");
+        app.auto.add("lumetri.switch.Power Windows", sw.expand(3.0), "Power Windows on/off");
+        app.auto.add("lumetri.switch.Masks", sw.expand(3.0), "Masks on/off");
+    }
     if sw_resp.clicked() {
         return (open, true);
     }
@@ -847,39 +1006,45 @@ fn color_wheel(ui: &mut egui::Ui, e: &EffectInstance, mt: Tick, id: &str, lid: &
 /// Apply Match (`lumetri.applyMatch`).
 fn match_controls(ui: &mut egui::Ui, app: &mut FilmcraftApp, out: &mut Vec<(&'static str, Value)>) {
     let t = app.tokens;
-    sub(ui, &t, tl!("Color Match"));
     let key = egui::Id::new("lumetri-match-ref");
     let fd_key = egui::Id::new("lumetri-match-face");
     let mut tc: String = ui.data(|d| d.get_temp(key)).unwrap_or_else(|| "00:00:00:00".to_string());
     let mut face: bool = ui.data(|d| d.get_temp(fd_key)).unwrap_or(true);
-    // Comparison View: the Program monitor shows the reference frame next to the current one, and
-    // Apply Match uses that reference
     let comparing = app.ui.program.display_mode() == Some(crate::state::DisplayMode::Comparison);
-    let b = ui.selectable_label(comparing, tl!("Comparison View"));
-    app.auto.add("lumetri.match.comparisonView", b.rect, "Comparison View");
-    if b.clicked() {
-        out.push(("view.display", json!({"display": if comparing { "composite" } else { "comparison" }})));
-    }
+
+    ui.horizontal(|ui| {
+        sub(ui, &t, tl!("Color Match"));
+        ui.add_space(8.0);
+        let b = ui.selectable_label(comparing, tl!("Comparison View"));
+        app.auto.add("lumetri.match.comparisonView", b.rect, "Comparison View");
+        if b.clicked() {
+            out.push(("view.display", json!({"display": if comparing { "composite" } else { "comparison" }})));
+        }
+    });
+
     let reference = app.ui.program.compare_ref.filter(|_| comparing).map(filmcraft_time::Tick);
     if let (Some(r), Some(q)) = (reference, app.session.active_sequence()) {
         tc = filmcraft_time::format_time(r, q.settings.frame_rate, q.settings.drop_frame, filmcraft_time::TimeDisplay::Timecode, 48000);
     }
+
     ui.horizontal(|ui| {
-        ui.add_sized(vec2(110.0, 20.0), egui::Label::new(egui::RichText::new(tl!("Reference")).color(t.text_dim)));
-        let r = ui.add(egui::TextEdit::singleline(&mut tc).desired_width(96.0));
+        ui.label(egui::RichText::new(tl!("Reference")).color(t.text_dim).small());
+        let r = ui.add(egui::TextEdit::singleline(&mut tc).desired_width(85.0));
         app.auto.add("lumetri.match.reference", r.rect, "Reference timecode");
+        let b = ui.button(tl!("Apply Match"));
+        app.auto.add("lumetri.match.apply", b.rect, "Apply Match");
+        if b.clicked() {
+            let p = match reference {
+                Some(r) => json!({"referenceTime": r.0, "faceDetection": face}),
+                None => json!({"referenceTimecode": tc, "faceDetection": face}),
+            };
+            out.push(("lumetri.applyMatch", p));
+        }
     });
+
     let r = ui.checkbox(&mut face, tl!("Face Detection (protect skin tones)"));
     app.auto.add("lumetri.match.faceDetection", r.rect, "Face Detection");
-    let b = ui.button(tl!("Apply Match"));
-    app.auto.add("lumetri.match.apply", b.rect, "Apply Match");
-    if b.clicked() {
-        let p = match reference {
-            Some(r) => json!({"referenceTime": r.0, "faceDetection": face}),
-            None => json!({"referenceTimecode": tc, "faceDetection": face}),
-        };
-        out.push(("lumetri.applyMatch", p));
-    }
+
     ui.data_mut(|d| {
         d.insert_temp(key, tc);
         d.insert_temp(fd_key, face);

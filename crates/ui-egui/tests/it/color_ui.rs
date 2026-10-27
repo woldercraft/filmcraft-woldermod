@@ -510,3 +510,41 @@ fn timeline_clips_selector_and_draggable_nodes() {
     d.frames(2);
     assert!(!d.app().ui.color_node_positions.contains_key(&key), "organize should clear custom positions");
 }
+
+#[test]
+fn davinci_resolve_color_page_layout_and_power_windows() {
+    let mut d = Driver::demo();
+    d.ok("ui.set", json!({"workspace": "Color"}));
+    d.frames(4);
+
+    // 1. Clips ribbon is present
+    assert!(d.element("color_clips.index.0").is_some());
+
+    // 2. Select clip and apply lumetri
+    let clip = select_first_clip(&mut d);
+    d.exec("effects.apply", json!({"clips": [clip], "effect": "lumetri"}));
+    d.frames(3);
+
+    // 3. Power Windows / Máscara Palette
+    d.click("lumetri.section.Power Windows");
+    d.frames(2);
+    assert!(d.element("lumetri.mask.add_linear").is_some(), "linear window button exists");
+    assert!(d.element("lumetri.mask.add_circle").is_some(), "circle window button exists");
+    assert!(d.element("lumetri.mask.add_pen").is_some(), "pen window button exists");
+
+    // Add a Circle Power Window
+    d.click("lumetri.mask.add_circle");
+    d.frames(3);
+
+    let mask_list = d.exec("masks.list", json!({"clip": clip}));
+    let masks = mask_list["masks"].as_array().unwrap();
+    assert_eq!(masks.len(), 1, "Circle power window created on color node");
+    assert_eq!(masks[0]["name"], "Mask (1)");
+
+    // Add a Linear Power Window
+    d.click("lumetri.mask.add_linear");
+    d.frames(3);
+    let mask_list = d.exec("masks.list", json!({"clip": clip}));
+    let masks = mask_list["masks"].as_array().unwrap();
+    assert_eq!(masks.len(), 2, "Linear power window created on color node");
+}

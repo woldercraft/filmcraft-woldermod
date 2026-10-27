@@ -156,54 +156,54 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let btn_h = 24.0;
 
     // + Add Serial Node
-    let add_w = 145.0;
+    let add_w = 80.0;
     let add_r = Rect::from_min_size(pos2(bx, by), vec2(add_w, btn_h));
     let add_resp = ui.interact(add_r, egui::Id::new("color_nodes_add_serial_btn"), Sense::click()).on_hover_text(tl!("Add Serial Node (Alt+S)"));
     app.auto.add("color_nodes.add_serial", add_r, "Add Serial Node");
     let add_bg = if add_resp.hovered() { t.hover } else { Color32::from_rgb(36, 40, 48) };
     ui.painter().rect_filled(add_r, 4.0, add_bg);
     ui.painter().rect_stroke(add_r, 4.0, Stroke::new(1.0, Color32::from_rgb(55, 60, 72)), StrokeKind::Inside);
-    ui.painter().text(add_r.center(), Align2::CENTER_CENTER, tl!("+ Add Serial (Alt+S)"), Tokens::ui(11.0), t.text);
+    ui.painter().text(add_r.center(), Align2::CENTER_CENTER, tl!("+ Serial"), Tokens::ui(11.0), t.text);
     if add_resp.clicked() {
         add_serial = true;
     }
-    bx += add_w + 8.0;
+    bx += add_w + 6.0;
 
     if node_count > 0 {
         // Bypass Node
         let curr_enabled = lumetri_effects[active_node].1.enabled;
-        let bypass_w = 130.0;
+        let bypass_w = 60.0;
         let bypass_r = Rect::from_min_size(pos2(bx, by), vec2(bypass_w, btn_h));
         let bypass_resp = ui.interact(bypass_r, egui::Id::new("color_nodes_bypass_btn"), Sense::click());
         app.auto.add("color_nodes.bypass_node", bypass_r, "Bypass Node");
         let bypass_bg = if bypass_resp.hovered() { t.hover } else { Color32::from_rgb(36, 40, 48) };
         ui.painter().rect_filled(bypass_r, 4.0, bypass_bg);
         ui.painter().rect_stroke(bypass_r, 4.0, Stroke::new(1.0, Color32::from_rgb(55, 60, 72)), StrokeKind::Inside);
-        let b_text = if curr_enabled { tl!("Bypass Node (Ctrl+D)") } else { tl!("Enable Node (Ctrl+D)") };
+        let b_text = if curr_enabled { tl!("Bypass") } else { tl!("Enable") };
         ui.painter().text(bypass_r.center(), Align2::CENTER_CENTER, b_text, Tokens::ui(11.0), t.text);
         if bypass_resp.clicked() {
             bypass_active = true;
         }
-        bx += bypass_w + 6.0;
+        bx += bypass_w + 5.0;
 
         // Bypass All
         let all_bypassed = lumetri_effects.iter().all(|(_, e)| !e.enabled);
-        let all_w = 125.0;
+        let all_w = 40.0;
         let all_r = Rect::from_min_size(pos2(bx, by), vec2(all_w, btn_h));
         let all_resp = ui.interact(all_r, egui::Id::new("color_nodes_bypass_all_btn"), Sense::click());
         app.auto.add("color_nodes.bypass_all", all_r, "Bypass All Nodes");
         let all_bg = if all_resp.hovered() { t.hover } else { Color32::from_rgb(36, 40, 48) };
         ui.painter().rect_filled(all_r, 4.0, all_bg);
         ui.painter().rect_stroke(all_r, 4.0, Stroke::new(1.0, Color32::from_rgb(55, 60, 72)), StrokeKind::Inside);
-        let a_text = if all_bypassed { tl!("Enable All (Shift+D)") } else { tl!("Bypass All (Shift+D)") };
+        let a_text = if all_bypassed { tl!("All") } else { tl!("All") };
         ui.painter().text(all_r.center(), Align2::CENTER_CENTER, a_text, Tokens::ui(11.0), t.text);
         if all_resp.clicked() {
             bypass_all = true;
         }
-        bx += all_w + 6.0;
+        bx += all_w + 5.0;
 
         // Reset Node
-        let rst_w = 75.0;
+        let rst_w = 50.0;
         let rst_r = Rect::from_min_size(pos2(bx, by), vec2(rst_w, btn_h));
         let rst_resp = ui.interact(rst_r, egui::Id::new("color_nodes_rst_btn"), Sense::click());
         app.auto.add("color_nodes.reset_node", rst_r, "Reset Node");
@@ -214,11 +214,11 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         if rst_resp.clicked() {
             reset_active = true;
         }
-        bx += rst_w + 6.0;
+        bx += rst_w + 5.0;
 
         // Delete Node
         if node_count > 1 {
-            let del_w = 60.0;
+            let del_w = 55.0;
             let del_r = Rect::from_min_size(pos2(bx, by), vec2(del_w, btn_h));
             let del_resp = ui.interact(del_r, egui::Id::new("color_nodes_del_btn"), Sense::click());
             app.auto.add("color_nodes.delete_node", del_r, "Delete Node");
@@ -229,11 +229,11 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             if del_resp.clicked() {
                 delete_active = true;
             }
-            bx += del_w + 6.0;
+            bx += del_w + 5.0;
         }
 
         // Organizar Nodos (Clean Up / Reset Node Layout)
-        let org_w = 80.0;
+        let org_w = 75.0;
         let org_r = Rect::from_min_size(pos2(bx, by), vec2(org_w, btn_h));
         let org_resp = ui.interact(org_r, egui::Id::new("color_nodes_org_btn"), Sense::click()).on_hover_text(tl!("Alinear y organizar nodos en serie"));
         app.auto.add("color_nodes.organize", org_r, "Organizar Nodos");

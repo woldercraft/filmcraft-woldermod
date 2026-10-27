@@ -331,19 +331,35 @@ pub fn workspace(name: &str) -> DockNode {
             ),
             bottom_editing(),
         ),
-        "Color" => hsplit(
-            FixedB(380.0),
-            vsplit(
+        "Color" => {
+            let top_row = hsplit(
+                FixedA(270.0),
+                tabs(&[Project, MediaBrowser, Effects], 0),
+                hsplit(
+                    Ratio(0.55),
+                    tabs(&[Program], 0),
+                    tabs(&[ColorNodes], 0),
+                ),
+            );
+            let bottom_row = hsplit(
                 Ratio(0.72),
-                hsplit(Ratio(0.48), tabs(&[Program, LumetriScopes], 0), tabs(&[ColorNodes], 0)),
-                tabs(&[ColorClips], 0),
-            ),
-            tabs(&[LumetriColor, Effects], 0),
-        ),
+                tabs(&[LumetriColor], 0),
+                tabs(&[LumetriScopes], 0),
+            );
+            vsplit(
+                Ratio(0.40),
+                top_row,
+                vsplit(
+                    FixedA(92.0),
+                    tabs(&[ColorClips], 0),
+                    bottom_row,
+                ),
+            )
+        }
         "Effects" => hsplit(
             FixedB(320.0),
             vsplit(
-                Ratio(0.5),
+                Ratio(0.52),
                 hsplit(Ratio(0.5), tabs(&[Source, EffectControls, AudioClipMixer], 1), tabs(&[Program], 0)),
                 hsplit(Ratio(0.3), tabs(&[Project, MediaBrowser, Info, Markers, History], 0), bottom_editing()),
             ),
