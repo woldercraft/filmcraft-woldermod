@@ -43,10 +43,17 @@ pub enum PanelKind {
     MacroTimeline,
     ColorNodes,
     ColorClips,
+    ColorPrimaries,
+    ColorWheels,
+    ColorCurves,
+    ColorMasks,
+    ColorQualifier,
+    ColorCreative,
+    ColorVignette,
 }
 
 impl PanelKind {
-    pub const ALL: [PanelKind; 31] = [
+    pub const ALL: [PanelKind; 38] = [
         PanelKind::Project,
         PanelKind::MediaBrowser,
         PanelKind::Libraries,
@@ -78,6 +85,13 @@ impl PanelKind {
         PanelKind::MacroTimeline,
         PanelKind::ColorNodes,
         PanelKind::ColorClips,
+        PanelKind::ColorPrimaries,
+        PanelKind::ColorWheels,
+        PanelKind::ColorCurves,
+        PanelKind::ColorMasks,
+        PanelKind::ColorQualifier,
+        PanelKind::ColorCreative,
+        PanelKind::ColorVignette,
     ];
     pub fn title(self) -> &'static str {
         match self {
@@ -112,6 +126,13 @@ impl PanelKind {
             PanelKind::MacroTimeline => "Macro Timeline",
             PanelKind::ColorNodes => "Color Nodes",
             PanelKind::ColorClips => "Clips",
+            PanelKind::ColorPrimaries => "Primaries",
+            PanelKind::ColorWheels => "Color Wheels & Match",
+            PanelKind::ColorCurves => "Curves",
+            PanelKind::ColorMasks => "Power Windows",
+            PanelKind::ColorQualifier => "Qualifier",
+            PanelKind::ColorCreative => "Creative & LUTs",
+            PanelKind::ColorVignette => "Vignette",
         }
     }
     pub fn id(self) -> String {
@@ -472,6 +493,52 @@ impl DockNode {
         });
         crate::dock_shared::apply_tree(self, craft_ui::docking::Action::Open { panel: p, anchor });
     }
+    /// Replace one panel with another in-place within its tab group.
+    pub fn replace_panel(&mut self, from: PanelKind, to: PanelKind) -> bool {
+        match self {
+            DockNode::Split { a, b, .. } => a.replace_panel(from, to) || b.replace_panel(from, to),
+            DockNode::Tabs { panels, .. } => {
+                if let Some(pos) = panels.iter().position(|p| *p == from) {
+                    panels[pos] = to;
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+    /// Swap the positions of two panels anywhere in the tree.
+    pub fn swap_panels(&mut self, p1: PanelKind, p2: PanelKind) -> bool {
+        fn swap_in(n: &mut DockNode, a: PanelKind, b: PanelKind) {
+            match n {
+                DockNode::Split { a: left, b: right, .. } => {
+                    swap_in(left, a, b);
+                    swap_in(right, a, b);
+                }
+                DockNode::Tabs { panels, .. } => {
+                    for p in panels.iter_mut() {
+                        if *p == a {
+                            *p = b;
+                        } else if *p == b {
+                            *p = a;
+                        }
+                    }
+                }
+            }
+        }
+        let e1 = self.contains(p1);
+        let e2 = self.contains(p2);
+        if e1 && e2 {
+            swap_in(self, p1, p2);
+            true
+        } else if e1 {
+            self.replace_panel(p1, p2)
+        } else if e2 {
+            self.replace_panel(p2, p1)
+        } else {
+            false
+        }
+    }
 }
 
 /// A floating group retains the same panel identities as docked tabs.
@@ -500,6 +567,38 @@ impl Layout {
     }
     pub fn contains(&self, panel: PanelKind) -> bool {
         self.root.contains(panel) || self.floating.iter().any(|group| group.panels.contains(&panel))
+    }
+    pub fn replace_panel(&mut self, from: PanelKind, to: PanelKind) -> bool {
+        if self.root.replace_panel(from, to) {
+            return true;
+        }
+        for g in &mut self.floating {
+            if let Some(pos) = g.panels.iter().position(|p| *p == from) {
+                g.panels[pos] = to;
+                return true;
+            }
+        }
+        false
+    }
+    pub fn swap_panels(&mut self, p1: PanelKind, p2: PanelKind) -> bool {
+        if self.root.swap_panels(p1, p2) {
+            return true;
+        }
+        for g in &mut self.floating {
+            let e1 = g.panels.iter().position(|p| *p == p1);
+            let e2 = g.panels.iter().position(|p| *p == p2);
+            if let (Some(i1), Some(i2)) = (e1, e2) {
+                g.panels.swap(i1, i2);
+                return true;
+            } else if let Some(i1) = e1 {
+                g.panels[i1] = p2;
+                return true;
+            } else if let Some(i2) = e2 {
+                g.panels[i2] = p1;
+                return true;
+            }
+        }
+        false
     }
 }
 

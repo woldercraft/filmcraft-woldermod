@@ -898,7 +898,17 @@ impl FilmcraftApp {
                     .into_iter()
                     .find(|k| self.ui.dock.contains(*k))
                     .unwrap_or(PanelKind::Program),
-                PanelKind::LumetriColor | PanelKind::EssentialGraphics | PanelKind::EssentialSound | PanelKind::Properties => PanelKind::Program,
+                PanelKind::LumetriColor
+                | PanelKind::ColorPrimaries
+                | PanelKind::ColorWheels
+                | PanelKind::ColorCurves
+                | PanelKind::ColorMasks
+                | PanelKind::ColorQualifier
+                | PanelKind::ColorCreative
+                | PanelKind::ColorVignette
+                | PanelKind::EssentialGraphics
+                | PanelKind::EssentialSound
+                | PanelKind::Properties => PanelKind::Program,
                 PanelKind::Source
                 | PanelKind::EffectControls
                 | PanelKind::AudioClipMixer
@@ -924,6 +934,41 @@ impl FilmcraftApp {
         }
         let _ = self.apply_dock(craft_ui::docking::Action::Activate { panel: p });
         self.ui.focused = p;
+    }
+
+    /// Begin dragging a panel into the dock system across the screen.
+    pub fn begin_panel_drag(&mut self, ctx: &egui::Context, panel: PanelKind, near: PanelKind) {
+        if !self.ui.dock.contains(panel) && !self.ui.floating.iter().any(|g| g.panels.contains(&panel)) {
+            self.ui.dock.open_near(panel, near);
+        }
+        ctx.data_mut(|data| data.insert_temp(crate::dock_ui::drag_id(), panel));
+        self.ui.focused = panel;
+        ctx.request_repaint();
+    }
+
+    /// Switch the active tool or replace the color panel in place.
+    pub fn switch_color_window(&mut self, current: PanelKind, target: PanelKind, target_tool_id: &str) {
+        self.ui.lumetri_active_tool = target_tool_id.to_string();
+        if current == target {
+            return;
+        }
+        if current == PanelKind::LumetriColor {
+            if !self.ui.dock.contains(target) && !self.ui.floating.iter().any(|g| g.panels.contains(&target)) {
+                self.ui.dock.replace_panel(current, target);
+                self.ui.focused = target;
+            } else {
+                self.ui.focused = target;
+                let _ = self.apply_dock(craft_ui::docking::Action::Activate { panel: target });
+            }
+            return;
+        }
+        if self.ui.dock.contains(target) || self.ui.floating.iter().any(|g| g.panels.contains(&target)) {
+            self.ui.focused = target;
+            let _ = self.apply_dock(craft_ui::docking::Action::Activate { panel: target });
+        } else {
+            self.ui.dock.replace_panel(current, target);
+            self.ui.focused = target;
+        }
     }
 
     /// Reveal in Project: bring the Project panel forward, showing the bin that holds `item` with

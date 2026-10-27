@@ -17,7 +17,7 @@ fn floating_rect(group: &dock::Floating, screen: Rect) -> Rect {
     ))
 }
 
-fn drag_id() -> egui::Id {
+pub(crate) fn drag_id() -> egui::Id {
     egui::Id::new("dock-panel-drag")
 }
 
@@ -374,7 +374,8 @@ impl FilmcraftApp {
                 painter.rect_filled(mark, 0.0, t.focus);
             }
         }
-        let title = painter.layout_no_wrap(panel.title().to_owned(), crate::theme::Tokens::ui(12.0), Color32::WHITE);
+        let title_str = crate::i18n::t(panel.title());
+        let title = painter.layout_no_wrap(title_str.to_owned(), crate::theme::Tokens::ui(12.0), Color32::WHITE);
         let ghost = Rect::from_min_size(pos + vec2(12.0, 10.0), title.size() + vec2(16.0, 8.0));
         painter.rect_filled(ghost, 4.0, t.focus.gamma_multiply(0.85));
         painter.galley(ghost.min + vec2(8.0, 4.0), title, Color32::WHITE);

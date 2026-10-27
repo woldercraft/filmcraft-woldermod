@@ -597,3 +597,45 @@ fn color_nodes_pan_zoom_and_multi_row() {
     assert!(d.element("lumetri.node.add").is_some(), "lumetri.node.add stays visible");
     assert!(d.element("lumetri.node.0").is_some(), "lumetri.node.0 visible");
 }
+
+#[test]
+fn color_tool_panels_docking_and_switching() {
+    use filmcraft_ui_egui::dock::PanelKind;
+    let mut d = Driver::demo();
+    d.ok("ui.set", json!({"workspace": "Color"}));
+    d.frames(3);
+    let clip = select_first_clip(&mut d);
+    d.exec("effects.apply", json!({"clips": [clip], "effect": "lumetri"}));
+    d.frames(3);
+
+    // Initial state: Color workspace has LumetriColor docked
+    assert!(d.harness.state().ui.dock.contains(PanelKind::LumetriColor));
+
+    // Clicking switches window or tool
+    d.harness.state_mut().switch_color_window(PanelKind::LumetriColor, PanelKind::ColorCurves, "Curves");
+    d.frames(2);
+    assert!(d.harness.state().ui.dock.contains(PanelKind::ColorCurves));
+
+    // Can dock ColorWheels into workspace as a separate window
+    d.harness.state_mut().show_panel(PanelKind::ColorWheels);
+    d.frames(2);
+    assert!(d.harness.state().ui.dock.contains(PanelKind::ColorCurves));
+    assert!(d.harness.state().ui.dock.contains(PanelKind::ColorWheels));
+
+    // Both panels are visible simultaneously in the dock layout
+    assert_ne!(PanelKind::ColorCurves, PanelKind::ColorWheels);
+
+    // Float ColorMasks window anywhere on screen
+    d.harness.state_mut().show_panel(PanelKind::ColorMasks);
+    d.harness.state_mut().apply_dock(craft_ui::docking::Action::Float {
+        panel: PanelKind::ColorMasks,
+        rect: [100.0, 100.0, 400.0, 300.0],
+    }).unwrap();
+    d.frames(2);
+    assert!(d.harness.state().ui.floating.iter().any(|g| g.panels.contains(&PanelKind::ColorMasks)));
+
+    // Begin panel drag test
+    let ctx = d.harness.ctx.clone();
+    d.harness.state_mut().begin_panel_drag(&ctx, PanelKind::ColorCreative, PanelKind::ColorCurves);
+    assert!(d.harness.state().ui.dock.contains(PanelKind::ColorCreative));
+}

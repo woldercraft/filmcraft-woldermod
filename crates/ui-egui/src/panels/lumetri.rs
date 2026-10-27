@@ -111,17 +111,102 @@ pub const ALL_TOOLS: [LumetriToolDef; 7] = [
     },
 ];
 
+impl LumetriToolDef {
+    pub fn panel_kind(&self) -> crate::dock::PanelKind {
+        match self.id {
+            "Basic Correction" => crate::dock::PanelKind::ColorPrimaries,
+            "Color Wheels & Match" => crate::dock::PanelKind::ColorWheels,
+            "Curves" => crate::dock::PanelKind::ColorCurves,
+            "Power Windows / Máscara" => crate::dock::PanelKind::ColorMasks,
+            "HSL Secondary" => crate::dock::PanelKind::ColorQualifier,
+            "Creative" => crate::dock::PanelKind::ColorCreative,
+            "Vignette" => crate::dock::PanelKind::ColorVignette,
+            _ => crate::dock::PanelKind::LumetriColor,
+        }
+    }
+}
+
+pub fn tool_for_panel(panel: crate::dock::PanelKind) -> Option<&'static str> {
+    match panel {
+        crate::dock::PanelKind::ColorPrimaries => Some("Basic Correction"),
+        crate::dock::PanelKind::ColorWheels => Some("Color Wheels & Match"),
+        crate::dock::PanelKind::ColorCurves => Some("Curves"),
+        crate::dock::PanelKind::ColorMasks => Some("Power Windows / Máscara"),
+        crate::dock::PanelKind::ColorQualifier => Some("HSL Secondary"),
+        crate::dock::PanelKind::ColorCreative => Some("Creative"),
+        crate::dock::PanelKind::ColorVignette => Some("Vignette"),
+        _ => None,
+    }
+}
+
+pub fn draw_tool_icon(painter: &egui::Painter, center: Pos2, tool_id: &str, color: Color32) {
+    match tool_id {
+        "Basic Correction" => {
+            // Three mini fader sliders with knobs
+            for col in 0..3 {
+                let x = center.x + (col as f32 - 1.0) * 4.5;
+                painter.line_segment([pos2(x, center.y - 5.5), pos2(x, center.y + 5.5)], Stroke::new(1.0, color.gamma_multiply(0.5)));
+                let pip_y = center.y + match col { 0 => -1.5, 1 => 2.0, _ => -0.5 };
+                painter.circle_filled(pos2(x, pip_y), 1.6, color);
+            }
+        }
+        "Color Wheels & Match" => {
+            // Color wheel circle with central reticle
+            painter.circle_stroke(center, 5.5, Stroke::new(1.2, color));
+            painter.circle_filled(center, 1.8, color);
+        }
+        "Curves" => {
+            // Smooth tone curve
+            let p0 = pos2(center.x - 5.5, center.y + 4.5);
+            let p1 = pos2(center.x - 2.0, center.y + 2.5);
+            let p2 = pos2(center.x + 2.0, center.y - 2.5);
+            let p3 = pos2(center.x + 5.5, center.y - 4.5);
+            painter.line_segment([p0, p1], Stroke::new(1.3, color));
+            painter.line_segment([p1, p2], Stroke::new(1.3, color));
+            painter.line_segment([p2, p3], Stroke::new(1.3, color));
+        }
+        "Power Windows / Máscara" => {
+            // Mask / Power Window rectangle
+            let m_rect = Rect::from_center_size(center, vec2(11.0, 10.0));
+            painter.rect_stroke(m_rect, 2.0, Stroke::new(1.2, color), StrokeKind::Inside);
+        }
+        "HSL Secondary" => {
+            // Eyedropper / Qualifier tool
+            let tip = pos2(center.x - 4.5, center.y + 4.5);
+            let top = pos2(center.x + 4.5, center.y - 4.5);
+            painter.line_segment([tip, top], Stroke::new(1.5, color));
+            painter.circle_filled(tip, 1.3, color);
+            painter.circle_filled(top, 2.0, color);
+        }
+        "Creative" => {
+            // Film frame with sprockets
+            let f_rect = Rect::from_center_size(center, vec2(12.0, 10.0));
+            painter.rect_stroke(f_rect, 1.5, Stroke::new(1.0, color), StrokeKind::Inside);
+            painter.line_segment([pos2(f_rect.min.x + 3.0, f_rect.min.y), pos2(f_rect.min.x + 3.0, f_rect.max.y)], Stroke::new(0.8, color.gamma_multiply(0.5)));
+            painter.line_segment([pos2(f_rect.max.x - 3.0, f_rect.min.y), pos2(f_rect.max.x - 3.0, f_rect.max.y)], Stroke::new(0.8, color.gamma_multiply(0.5)));
+        }
+        "Vignette" => {
+            // Vignette aperture lens
+            painter.circle_stroke(center, 5.5, Stroke::new(1.0, color.gamma_multiply(0.6)));
+            painter.circle_filled(center, 3.2, color);
+        }
+        _ => {
+            painter.circle_filled(center, 3.0, color);
+        }
+    }
+}
+
 pub fn get_tool_def(id: &str) -> Option<LumetriToolDef> {
     ALL_TOOLS.iter().find(|t| t.id == id).copied()
 }
 
-pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
+pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, current_panel: crate::dock::PanelKind) {
     let t = app.tokens;
     let Some((clip, it)) = active_color_clip(app) else {
         crate::dock::placeholder(ui, rect, &t, tl!("(no clip selected)"));
         return;
     };
-    let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(12.0, 6.0))).id_salt("lumetri2"));
+    let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(12.0, 6.0))).id_salt(("lumetri2", current_panel)));
     let lumetri_effects: Vec<(usize, &EffectInstance)> = it.effects.iter().enumerate().filter(|(_, e)| e.effect == "lumetri").collect();
     if lumetri_effects.is_empty() {
         bui.add_space(8.0);
@@ -199,31 +284,31 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let bar_pos = app.ui.lumetri_bar_pos.clone();
     match bar_pos.as_str() {
         "bottom" => {
-            egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt("lumetri_scroll").show(&mut bui, |ui| {
-                render_palette_content(ui, app, &e, clip, idx, mt, hdr, &mut actions, &mut lut_actions, &mut mask_actions, &mut auto_rows, &mut sections);
+            egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt(("lumetri_scroll", current_panel)).show(&mut bui, |ui| {
+                render_palette_content(ui, app, &e, current_panel, clip, idx, mt, hdr, &mut actions, &mut lut_actions, &mut mask_actions, &mut auto_rows, &mut sections);
                 ui.add_space(20.0);
             });
             bui.add_space(4.0);
-            render_palette_toolbar(&mut bui, app, &e, false, &mut sections);
+            render_palette_toolbar(&mut bui, app, &e, current_panel, false, &mut sections);
         }
         "left" => {
             bui.horizontal(|ui| {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt("lumetri_side_scroll").show(ui, |ui| {
-                    render_palette_toolbar(ui, app, &e, true, &mut sections);
+                egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt(("lumetri_side_scroll", current_panel)).show(ui, |ui| {
+                    render_palette_toolbar(ui, app, &e, current_panel, true, &mut sections);
                 });
                 ui.separator();
-                egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt("lumetri_scroll").show(ui, |ui| {
-                    render_palette_content(ui, app, &e, clip, idx, mt, hdr, &mut actions, &mut lut_actions, &mut mask_actions, &mut auto_rows, &mut sections);
+                egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt(("lumetri_scroll", current_panel)).show(ui, |ui| {
+                    render_palette_content(ui, app, &e, current_panel, clip, idx, mt, hdr, &mut actions, &mut lut_actions, &mut mask_actions, &mut auto_rows, &mut sections);
                     ui.add_space(20.0);
                 });
             });
         }
         _ => {
             // default: "top"
-            render_palette_toolbar(&mut bui, app, &e, false, &mut sections);
+            render_palette_toolbar(&mut bui, app, &e, current_panel, false, &mut sections);
             bui.add_space(4.0);
-            egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt("lumetri_scroll").show(&mut bui, |ui| {
-                render_palette_content(ui, app, &e, clip, idx, mt, hdr, &mut actions, &mut lut_actions, &mut mask_actions, &mut auto_rows, &mut sections);
+            egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt(("lumetri_scroll", current_panel)).show(&mut bui, |ui| {
+                render_palette_content(ui, app, &e, current_panel, clip, idx, mt, hdr, &mut actions, &mut lut_actions, &mut mask_actions, &mut auto_rows, &mut sections);
                 ui.add_space(20.0);
             });
         }
@@ -275,42 +360,39 @@ fn render_tool_buttons(
     ui: &mut egui::Ui,
     app: &mut FilmcraftApp,
     e: &EffectInstance,
+    current_panel: crate::dock::PanelKind,
     vertical: bool,
     sections: &mut Vec<&'static str>,
-    swap_action: &mut Option<(usize, usize)>,
 ) {
     let t = app.tokens;
     let num_tools = app.ui.lumetri_tool_order.len();
+    let current_tool_id = tool_for_panel(current_panel)
+        .map(String::from)
+        .unwrap_or_else(|| app.ui.lumetri_active_tool.clone());
+
     for i in 0..num_tools {
         let tool_id = app.ui.lumetri_tool_order[i].clone();
         let Some(def) = get_tool_def(&tool_id) else { continue };
 
         let key = format!("lumetri2:{}", def.id);
         let is_open = !app.ui.collapsed_fx.contains(&key) && (def.id == "Basic Correction" || app.ui.expanded_fx.contains(&key));
-        let is_primary = is_open || app.ui.lumetri_active_tool == def.id;
+        let is_primary = if current_panel == crate::dock::PanelKind::LumetriColor {
+            is_open || def.id == current_tool_id
+        } else {
+            def.id == current_tool_id
+        };
         let is_secondary = app.ui.lumetri_dual_view && app.ui.lumetri_secondary_tool == def.id;
+        let is_docked_elsewhere = def.panel_kind() != current_panel
+            && (app.ui.dock.contains(def.panel_kind()) || app.ui.floating.iter().any(|g| g.panels.contains(&def.panel_kind())));
         let is_on = e.param(def.param).and_then(|p| p.value.as_bool()).unwrap_or(def.param != "hsl_on");
 
-        let btn_size = if vertical { vec2(140.0, 26.0) } else { vec2(116.0, 26.0) };
+        let btn_size = if vertical { vec2(148.0, 26.0) } else { vec2(132.0, 26.0) };
         let (r, resp) = ui.allocate_exact_size(btn_size, Sense::click_and_drag());
 
-        // Drag and drop reordering
-        if resp.dragged() {
-            if let Some(ptr) = ui.input(|inp| inp.pointer.hover_pos()) {
-                if vertical {
-                    if ptr.y < r.min.y - 4.0 && i > 0 {
-                        *swap_action = Some((i, i - 1));
-                    } else if ptr.y > r.max.y + 4.0 && i + 1 < num_tools {
-                        *swap_action = Some((i, i + 1));
-                    }
-                } else {
-                    if ptr.x < r.min.x - 4.0 && i > 0 {
-                        *swap_action = Some((i, i - 1));
-                    } else if ptr.x > r.max.x + 4.0 && i + 1 < num_tools {
-                        *swap_action = Some((i, i + 1));
-                    }
-                }
-            }
+        // Drag to dock / float window anywhere across screen
+        if resp.drag_started() {
+            let target_panel = def.panel_kind();
+            app.begin_panel_drag(ui.ctx(), target_panel, current_panel);
         }
 
         // Draw button background & border
@@ -328,6 +410,8 @@ fn render_tool_buttons(
             Stroke::new(1.5, t.accent)
         } else if is_secondary {
             Stroke::new(1.0, Color32::from_rgb(160, 175, 200))
+        } else if is_docked_elsewhere {
+            Stroke::new(1.0, Color32::from_rgb(60, 110, 160))
         } else if resp.hovered() {
             Stroke::new(1.0, Color32::from_rgb(70, 75, 90))
         } else {
@@ -336,17 +420,23 @@ fn render_tool_buttons(
 
         ui.painter().rect(r, 4.0, bg_color, border_stroke, StrokeKind::Inside);
 
-        // Drag handle grip indicator ⠿
-        let grip_x = r.min.x + 6.0;
-        ui.painter().text(
-            pos2(grip_x, r.center().y),
-            Align2::LEFT_CENTER,
-            "⠿",
-            FontId::proportional(11.0),
-            if resp.hovered() { Color32::from_rgb(160, 170, 190) } else { Color32::from_rgb(70, 75, 88) },
-        );
+        // 1. Clean resolution-independent 6-dot drag grip handle (no missing glyph □□)
+        let dot_col = if resp.hovered() || resp.dragged() {
+            Color32::from_rgb(180, 190, 210)
+        } else {
+            Color32::from_rgb(75, 80, 95)
+        };
+        let gx = r.min.x + 7.0;
+        let gy = r.center().y;
+        for col in 0..2 {
+            for row in 0..3 {
+                let px = gx + col as f32 * 3.5;
+                let py = gy + (row as f32 - 1.0) * 3.5;
+                ui.painter().circle_filled(pos2(px, py), 1.0, dot_col);
+            }
+        }
 
-        // Icon + Label
+        // 2. Crisp vector icon drawn cleanly (no missing glyph □)
         let text_color = if is_primary {
             Color32::WHITE
         } else if resp.hovered() {
@@ -354,16 +444,19 @@ fn render_tool_buttons(
         } else {
             t.text_dim
         };
-        let text = format!("{} {}", def.icon, crate::i18n::t(def.label));
+        draw_tool_icon(ui.painter(), pos2(r.min.x + 22.0, r.center().y), def.id, text_color);
+
+        // 3. Translated tool label
+        let label_text = crate::i18n::t(def.label);
         ui.painter().text(
-            pos2(grip_x + 9.0, r.center().y),
+            pos2(r.min.x + 32.0, r.center().y),
             Align2::LEFT_CENTER,
-            text,
+            label_text,
             FontId::proportional(11.0),
             text_color,
         );
 
-        // Switch / Bypass indicator dot on the right of the button
+        // 4. Switch / Bypass indicator dot on the right of the button
         let sw_center = pos2(r.max.x - 11.0, r.center().y);
         let sw_rect = Rect::from_center_size(sw_center, vec2(14.0, 14.0));
         let sw_resp = ui.interact(sw_rect.expand(2.0), ui.id().with("sw_btn").with(i), Sense::click());
@@ -381,17 +474,29 @@ fn render_tool_buttons(
             sections.push(def.sec);
         }
 
-        // Click button to toggle / activate
+        // 5. Click button to switch this window to the selected tool
         if resp.clicked() && !sw_resp.clicked() {
-            if is_open {
-                app.ui.collapsed_fx.push(key.clone());
-                app.ui.expanded_fx.retain(|k| k != &key);
+            if current_panel == crate::dock::PanelKind::LumetriColor {
+                if is_open {
+                    app.ui.collapsed_fx.push(key.clone());
+                    app.ui.expanded_fx.retain(|k| k != &key);
+                } else {
+                    app.ui.collapsed_fx.retain(|k| k != &key);
+                    app.ui.expanded_fx.push(key.clone());
+                }
+                app.ui.lumetri_active_tool = def.id.to_string();
             } else {
-                app.ui.collapsed_fx.retain(|k| k != &key);
-                app.ui.expanded_fx.push(key.clone());
+                app.switch_color_window(current_panel, def.panel_kind(), def.id);
             }
-            app.ui.lumetri_active_tool = def.id.to_string();
         }
+
+        // Hover tooltip explaining both click and drag
+        let hover_msg = format!(
+            "{}\n• Clic: Cambiar esta ventana a {}\n• Arrastrar: Ubicar / acoplar ventana en cualquier lugar de la pantalla",
+            def.tooltip,
+            crate::i18n::t(def.label)
+        );
+        resp.on_hover_text(hover_msg);
 
         // Automation registers
         app.auto.add(&format!("lumetri.section.{}", def.id), r, def.id);
@@ -409,6 +514,7 @@ fn render_palette_toolbar(
     ui: &mut egui::Ui,
     app: &mut FilmcraftApp,
     e: &EffectInstance,
+    current_panel: crate::dock::PanelKind,
     vertical: bool,
     sections: &mut Vec<&'static str>,
 ) {
@@ -419,11 +525,9 @@ fn render_palette_toolbar(
     }
     app.ui.lumetri_tool_order.retain(|id| ALL_TOOLS.iter().any(|def| def.id == id));
 
-    let mut swap_action: Option<(usize, usize)> = None;
-
     if vertical {
         ui.vertical(|ui| {
-            render_tool_buttons(ui, app, e, true, sections, &mut swap_action);
+            render_tool_buttons(ui, app, e, current_panel, true, sections);
             ui.add_space(8.0);
             ui.separator();
             ui.add_space(4.0);
@@ -446,8 +550,12 @@ fn render_palette_toolbar(
         });
     } else {
         ui.horizontal(|ui| {
-            render_tool_buttons(ui, app, e, false, sections, &mut swap_action);
-            ui.add_space(8.0);
+            egui::ScrollArea::horizontal().auto_shrink([false, false]).id_salt(("tool_strip", current_panel)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    render_tool_buttons(ui, app, e, current_panel, false, sections);
+                });
+            });
+            ui.add_space(6.0);
             ui.separator();
             ui.add_space(4.0);
             let cur_pos = app.ui.lumetri_bar_pos.clone();
@@ -466,10 +574,6 @@ fn render_palette_toolbar(
             }
         });
     }
-
-    if let Some((from, to)) = swap_action {
-        app.ui.lumetri_tool_order.swap(from, to);
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -477,6 +581,7 @@ fn render_palette_content(
     ui: &mut egui::Ui,
     app: &mut FilmcraftApp,
     e: &EffectInstance,
+    current_panel: crate::dock::PanelKind,
     clip: ClipId,
     idx: usize,
     mt: Tick,
@@ -487,19 +592,21 @@ fn render_palette_content(
     auto_rows: &mut Vec<(String, Rect, &'static str)>,
     sections: &mut Vec<&'static str>,
 ) {
-    // Collect tools that are open
-    let open_tools: Vec<String> = app.ui.lumetri_tool_order.iter()
-        .filter(|id| {
-            let key = format!("lumetri2:{id}");
-            !app.ui.collapsed_fx.contains(&key) && (*id == "Basic Correction" || app.ui.expanded_fx.contains(&key))
-        })
-        .cloned()
-        .collect();
-
-    let tools_to_render = if open_tools.is_empty() {
-        vec![app.ui.lumetri_active_tool.clone()]
+    let tools_to_render = if let Some(forced) = tool_for_panel(current_panel) {
+        vec![forced.to_string()]
     } else {
-        open_tools
+        let open_tools: Vec<String> = app.ui.lumetri_tool_order.iter()
+            .filter(|id| {
+                let key = format!("lumetri2:{id}");
+                !app.ui.collapsed_fx.contains(&key) && (*id == "Basic Correction" || app.ui.expanded_fx.contains(&key))
+            })
+            .cloned()
+            .collect();
+        if open_tools.is_empty() {
+            vec![app.ui.lumetri_active_tool.clone()]
+        } else {
+            open_tools
+        }
     };
 
     if app.ui.lumetri_dual_view && tools_to_render.len() >= 2 {

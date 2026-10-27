@@ -1538,6 +1538,7 @@
 	Crawl Right	Desplazar a la derecha
 	Create folder for imported projects	Crear carpeta para los proyectos importados
 	Creative	Creativo
+	Creative & LUTs	Creative & LUTs
 	Crop	Recortar
 	Crop Less <-> Smooth More	Recortar menos <-> Suavizar más
 	Cross Displacement	Desplazamiento cruzado
@@ -2197,6 +2198,9 @@
 	Pin Vertical	Fijar vertical
 	Pinning	Fijación
 	Pitch Shifter	Cambiador de tono
+	Power Windows	Máscara
+	Power Windows / Máscara	Máscara
+	Primaries	Primarias
 	Plate	Placa
 	Plateau Wipe	Barrido en mesetas
 	Plateaus	Mesetas
@@ -2247,6 +2251,7 @@
 	Push	Empujar
 	Push (Legacy)	Empujar (heredado)
 	Q	Q
+	Qualifier	Cualificador
 	RAM reserved for other applications	RAM reservada para otras aplicaciones
 	RGB	RGB
 	RGB Split	División RGB
