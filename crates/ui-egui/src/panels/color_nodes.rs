@@ -229,6 +229,21 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             if del_resp.clicked() {
                 delete_active = true;
             }
+            bx += del_w + 6.0;
+        }
+
+        // Organizar Nodos (Clean Up / Reset Node Layout)
+        let org_w = 80.0;
+        let org_r = Rect::from_min_size(pos2(bx, by), vec2(org_w, btn_h));
+        let org_resp = ui.interact(org_r, egui::Id::new("color_nodes_org_btn"), Sense::click()).on_hover_text(tl!("Alinear y organizar nodos en serie"));
+        app.auto.add("color_nodes.organize", org_r, "Organizar Nodos");
+        let org_bg = if org_resp.hovered() { t.hover } else { Color32::from_rgb(36, 40, 48) };
+        ui.painter().rect_filled(org_r, 4.0, org_bg);
+        ui.painter().rect_stroke(org_r, 4.0, Stroke::new(1.0, Color32::from_rgb(55, 60, 72)), StrokeKind::Inside);
+        ui.painter().text(org_r.center(), Align2::CENTER_CENTER, tl!("Organizar"), Tokens::ui(11.0), t.text);
+        if org_resp.clicked() {
+            let prefix = format!("{}:", clip.0);
+            app.ui.color_node_positions.retain(|k, _| !k.starts_with(&prefix));
         }
     }
 
@@ -333,57 +348,63 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let start_x = (canvas_r.center().x - total_chain_w * 0.5).max(canvas_r.min.x + 24.0);
     let center_y = canvas_r.center().y;
 
-    // Draw [ IN ] Terminal on left
-    let in_rect = Rect::from_center_size(pos2(start_x + port_w * 0.5, center_y), vec2(port_w, port_h));
+    // Calculate node rects based on stored movable positions or default serial line
+    let mut node_rects = Vec::with_capacity(node_count);
+    for i in 0..node_count {
+        let key = format!("{}:{i}", clip.0);
+        let default_rel = [
+            (start_x + port_w + gap + i as f32 * (node_w + gap)) - canvas_r.min.x,
+            (center_y - node_h * 0.5) - canvas_r.min.y,
+        ];
+        let rel_pos = app.ui.color_node_positions.get(&key).copied().unwrap_or(default_rel);
+        let node_rect = Rect::from_min_size(canvas_r.min + vec2(rel_pos[0], rel_pos[1]), vec2(node_w, node_h));
+        node_rects.push(node_rect);
+    }
+
+    // Draw [ IN ] Terminal on left (aligned to first node)
+    let in_y = node_rects[0].center().y;
+    let in_x = (node_rects[0].min.x - gap - port_w).max(canvas_r.min.x + 10.0);
+    let in_rect = Rect::from_center_size(pos2(in_x + port_w * 0.5, in_y), vec2(port_w, port_h));
     painter.rect_filled(in_rect, 4.0, Color32::from_rgb(28, 30, 36));
     painter.rect_stroke(in_rect, 4.0, Stroke::new(1.0, Color32::from_rgb(50, 54, 64)), StrokeKind::Inside);
     painter.text(in_rect.center(), Align2::CENTER_CENTER, "IN", Tokens::ui(11.0), Color32::from_rgb(140, 150, 170));
 
-    let in_pin = pos2(in_rect.max.x, center_y);
+    let in_pin = pos2(in_rect.max.x, in_y);
     painter.circle_filled(in_pin, 4.0, Color32::from_rgb(60, 200, 80));
 
-    // Calculate node pin positions for wires
-    let mut node_rects = Vec::with_capacity(node_count);
-    let mut prev_output_pin = in_pin;
-
-    for i in 0..node_count {
-        let x = start_x + port_w + gap + i as f32 * (node_w + gap);
-        let node_rect = Rect::from_min_size(pos2(x, center_y - node_h * 0.5), vec2(node_w, node_h));
-        node_rects.push(node_rect);
-
-        let input_pin = pos2(node_rect.min.x, center_y);
-        let output_pin = pos2(node_rect.max.x, center_y);
-
-        // Draw wire from previous pin to this node's input pin
-        let e = lumetri_effects[i].1;
-        let wire_color = if e.enabled {
-            Color32::from_rgb(60, 200, 80) // Vibrant green wire
-        } else {
-            Color32::from_rgb(80, 85, 95) // Dim gray wire when bypassed
-        };
-        draw_bezier_wire(&painter, prev_output_pin, input_pin, Stroke::new(2.0, wire_color));
-
-        prev_output_pin = output_pin;
-    }
-
-    // Draw [ OUT ] Terminal on right
-    let out_x = start_x + total_chain_w - port_w * 0.5;
-    let out_rect = Rect::from_center_size(pos2(out_x, center_y), vec2(port_w, port_h));
+    // Draw [ OUT ] Terminal on right (aligned to last node)
+    let last_idx = node_count - 1;
+    let out_y = node_rects[last_idx].center().y;
+    let out_x = (node_rects[last_idx].max.x + gap).min(canvas_r.max.x - port_w - 10.0);
+    let out_rect = Rect::from_center_size(pos2(out_x + port_w * 0.5, out_y), vec2(port_w, port_h));
     painter.rect_filled(out_rect, 4.0, Color32::from_rgb(28, 30, 36));
     painter.rect_stroke(out_rect, 4.0, Stroke::new(1.0, Color32::from_rgb(50, 54, 64)), StrokeKind::Inside);
     painter.text(out_rect.center(), Align2::CENTER_CENTER, "OUT", Tokens::ui(11.0), Color32::from_rgb(140, 150, 170));
 
-    let out_pin = pos2(out_rect.min.x, center_y);
+    let out_pin = pos2(out_rect.min.x, out_y);
     painter.circle_filled(out_pin, 4.0, Color32::from_rgb(60, 200, 80));
 
-    // Draw wire from last node output pin to OUT terminal
+    // Draw connecting wires between movable pins
+    // 1. IN terminal to Node 0 input pin
+    let n0_in_pin = pos2(node_rects[0].min.x, node_rects[0].center().y);
+    let n0_enabled = lumetri_effects[0].1.enabled;
+    let w0_col = if n0_enabled { Color32::from_rgb(60, 200, 80) } else { Color32::from_rgb(80, 85, 95) };
+    draw_bezier_wire(&painter, in_pin, n0_in_pin, Stroke::new(2.0, w0_col));
+
+    // 2. Node i output pin to Node i+1 input pin
+    for i in 0..(node_count - 1) {
+        let p_out = pos2(node_rects[i].max.x, node_rects[i].center().y);
+        let p_in = pos2(node_rects[i + 1].min.x, node_rects[i + 1].center().y);
+        let enabled = lumetri_effects[i + 1].1.enabled;
+        let col = if enabled { Color32::from_rgb(60, 200, 80) } else { Color32::from_rgb(80, 85, 95) };
+        draw_bezier_wire(&painter, p_out, p_in, Stroke::new(2.0, col));
+    }
+
+    // 3. Last Node output pin to OUT terminal
+    let last_out_pin = pos2(node_rects[last_idx].max.x, node_rects[last_idx].center().y);
     let last_enabled = lumetri_effects.last().map(|(_, e)| e.enabled).unwrap_or(true);
-    let out_wire_color = if last_enabled {
-        Color32::from_rgb(60, 200, 80)
-    } else {
-        Color32::from_rgb(80, 85, 95)
-    };
-    draw_bezier_wire(&painter, prev_output_pin, out_pin, Stroke::new(2.0, out_wire_color));
+    let out_wire_color = if last_enabled { Color32::from_rgb(60, 200, 80) } else { Color32::from_rgb(80, 85, 95) };
+    draw_bezier_wire(&painter, last_out_pin, out_pin, Stroke::new(2.0, out_wire_color));
 
     // Render Each Node Card
     for (i, &(fx_idx, fx_inst)) in lumetri_effects.iter().enumerate() {
@@ -391,14 +412,30 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let is_active = i == active_node;
         let is_enabled = fx_inst.enabled;
 
-        // Card interaction
+        // Card interaction: click to select, drag to reposition anywhere
         let card_id = egui::Id::new(("color_node_card", clip.0, i));
-        let card_resp = ui.interact(node_rect, card_id, Sense::click());
+        let card_resp = ui.interact(node_rect, card_id, Sense::click_and_drag());
         app.auto.add(&format!("color_nodes.node.{i}"), node_rect, &format!("Node {:02}", i + 1));
+
+        if card_resp.dragged() {
+            let delta = card_resp.drag_delta();
+            let key = format!("{}:{i}", clip.0);
+            let default_rel = [
+                (start_x + port_w + gap + i as f32 * (node_w + gap)) - canvas_r.min.x,
+                (center_y - node_h * 0.5) - canvas_r.min.y,
+            ];
+            let pos = app.ui.color_node_positions.entry(key).or_insert(default_rel);
+            pos[0] += delta.x;
+            pos[1] += delta.y;
+        }
 
         if card_resp.clicked() {
             app.ui.active_color_node = i;
         }
+
+        // Draw node input & output pin dots on card border
+        painter.circle_filled(pos2(node_rect.min.x, node_rect.center().y), 3.5, Color32::from_rgb(60, 200, 80));
+        painter.circle_filled(pos2(node_rect.max.x, node_rect.center().y), 3.5, Color32::from_rgb(60, 200, 80));
 
         // Node card background
         let bg_color = if is_enabled {

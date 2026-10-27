@@ -120,21 +120,76 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(&mut bui, |ui| {
         if open_section(ui, app, &e, "Basic Correction", "basic_on", "basic", &mut sections) {
             lut_combo(ui, app, &e, "input_lut", tl!("Input LUT"), true, &mut lut_actions);
-            sub(ui, &t, tl!("Color"));
-            slider(ui, &e, mt, "temperature", tl!("Temperature"), Some(Gradient::Temp), &t, &mut actions, clip, idx);
-            slider(ui, &e, mt, "tint", tl!("Tint"), Some(Gradient::Tint), &t, &mut actions, clip, idx);
-            slider(ui, &e, mt, "saturation", tl!("Saturation"), None, &t, &mut actions, clip, idx);
-            sub(ui, &t, tl!("Light"));
-            for (id, label) in [
-                ("exposure", tl!("Exposure")),
-                ("contrast", tl!("Contrast")),
-                ("highlights", tl!("Highlights")),
-                ("shadows", tl!("Shadows")),
-                ("whites", tl!("Whites")),
-                ("blacks", tl!("Blacks")),
-            ] {
-                slider(ui, &e, mt, id, label, None, &t, &mut actions, clip, idx);
+            let primaries_mode_id = egui::Id::new("lumetri_primaries_mode");
+            let show_sliders = ui.data(|d| d.get_temp::<bool>(primaries_mode_id).unwrap_or(false));
+
+            ui.horizontal(|ui| {
+                sub(ui, &t, tl!("Ajustes Primarios"));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.selectable_label(show_sliders, tl!("Sliders")).clicked() {
+                        ui.data_mut(|d| d.insert_temp(primaries_mode_id, true));
+                    }
+                    if ui.selectable_label(!show_sliders, tl!("Perillas")).clicked() {
+                        ui.data_mut(|d| d.insert_temp(primaries_mode_id, false));
+                    }
+                });
+            });
+
+            if !show_sliders {
+                egui::ScrollArea::horizontal().auto_shrink([false, true]).max_height(72.0).id_salt("primary_knobs").show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let r = rotary_knob(ui, &e, mt, "temperature", tl!("Temperature"), "TEMP", (-100.0, 100.0), 0.0, 0.4, 0, "", Some(Color32::from_rgb(255, 140, 50)), &t, &mut actions, clip, idx);
+                        auto_rows.push(("lumetri.knob.temperature".into(), r, "Temperature"));
+
+                        let r = rotary_knob(ui, &e, mt, "tint", tl!("Tint"), "TINT", (-100.0, 100.0), 0.0, 0.4, 0, "", Some(Color32::from_rgb(220, 80, 200)), &t, &mut actions, clip, idx);
+                        auto_rows.push(("lumetri.knob.tint".into(), r, "Tint"));
+
+                        let r = rotary_knob(ui, &e, mt, "exposure", tl!("Exposure"), "EXP", (-5.0, 5.0), 0.0, 0.02, 1, " EV", Some(Color32::from_rgb(240, 220, 100)), &t, &mut actions, clip, idx);
+                        auto_rows.push(("lumetri.knob.exposure".into(), r, "Exposure"));
+
+                        let r = rotary_knob(ui, &e, mt, "contrast", tl!("Contrast"), "CONT", (-100.0, 100.0), 0.0, 0.4, 0, "", Some(Color32::from_rgb(180, 190, 210)), &t, &mut actions, clip, idx);
+                        auto_rows.push(("lumetri.knob.contrast".into(), r, "Contrast"));
+
+                        let r = rotary_knob(ui, &e, mt, "highlights", tl!("Highlights"), "HI", (-100.0, 100.0), 0.0, 0.4, 0, "", Some(Color32::from_rgb(245, 245, 245)), &t, &mut actions, clip, idx);
+                        auto_rows.push(("lumetri.knob.highlights".into(), r, "Highlights"));
+
+                        let r = rotary_knob(ui, &e, mt, "shadows", tl!("Shadows"), "SHAD", (-100.0, 100.0), 0.0, 0.4, 0, "", Some(Color32::from_rgb(90, 100, 120)), &t, &mut actions, clip, idx);
+                        auto_rows.push(("lumetri.knob.shadows".into(), r, "Shadows"));
+
+                        let r = rotary_knob(ui, &e, mt, "whites", tl!("Whites"), "WHITE", (-100.0, 100.0), 0.0, 0.4, 0, "", Some(Color32::from_rgb(255, 255, 255)), &t, &mut actions, clip, idx);
+                        auto_rows.push(("lumetri.knob.whites".into(), r, "Whites"));
+
+                        let r = rotary_knob(ui, &e, mt, "blacks", tl!("Blacks"), "BLACK", (-100.0, 100.0), 0.0, 0.4, 0, "", Some(Color32::from_rgb(70, 75, 85)), &t, &mut actions, clip, idx);
+                        auto_rows.push(("lumetri.knob.blacks".into(), r, "Blacks"));
+
+                        let r = rotary_knob(ui, &e, mt, "saturation", tl!("Saturation"), "SAT", (0.0, 200.0), 100.0, 0.4, 0, "%", Some(Color32::from_rgb(80, 200, 120)), &t, &mut actions, clip, idx);
+                        auto_rows.push(("lumetri.knob.saturation".into(), r, "Saturation"));
+
+                        let r = rotary_knob(ui, &e, mt, "vibrance", tl!("Vibrance"), "VIB", (-100.0, 100.0), 0.0, 0.4, 0, "", Some(Color32::from_rgb(100, 170, 240)), &t, &mut actions, clip, idx);
+                        auto_rows.push(("lumetri.knob.vibrance".into(), r, "Vibrance"));
+
+                        let r = rotary_knob(ui, &e, mt, "sharpen", tl!("Sharpen"), "SHRP", (-100.0, 100.0), 0.0, 0.4, 0, "", Some(Color32::from_rgb(220, 180, 100)), &t, &mut actions, clip, idx);
+                        auto_rows.push(("lumetri.knob.sharpen".into(), r, "Sharpen"));
+                    });
+                });
+            } else {
+                sub(ui, &t, tl!("Color"));
+                slider(ui, &e, mt, "temperature", tl!("Temperature"), Some(Gradient::Temp), &t, &mut actions, clip, idx);
+                slider(ui, &e, mt, "tint", tl!("Tint"), Some(Gradient::Tint), &t, &mut actions, clip, idx);
+                slider(ui, &e, mt, "saturation", tl!("Saturation"), None, &t, &mut actions, clip, idx);
+                sub(ui, &t, tl!("Light"));
+                for (id, label) in [
+                    ("exposure", tl!("Exposure")),
+                    ("contrast", tl!("Contrast")),
+                    ("highlights", tl!("Highlights")),
+                    ("shadows", tl!("Shadows")),
+                    ("whites", tl!("Whites")),
+                    ("blacks", tl!("Blacks")),
+                ] {
+                    slider(ui, &e, mt, id, label, None, &t, &mut actions, clip, idx);
+                }
             }
+
             if hdr {
                 sub(ui, &t, tl!("HDR"));
                 for (id, label) in [("hdr_white", tl!("HDR White")), ("hdr_specular", tl!("HDR Specular"))] {
@@ -218,7 +273,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             }
         }
         if open_section(ui, app, &e, "Color Wheels & Match", "wheels_on", "wheels", &mut sections) {
-            let w = ((ui.available_width() - 24.0) / 3.0).min(120.0);
+            let w = ((ui.available_width() - 24.0) / 3.0).min(115.0);
             ui.horizontal(|ui| {
                 for (id, lid, label) in [
                     ("wheel_shadows", "wheel_shadows_l", tl!("Shadows")),
@@ -418,6 +473,122 @@ fn section(ui: &mut egui::Ui, app: &mut FilmcraftApp, name: &str, on: bool) -> (
 fn sub(ui: &mut egui::Ui, t: &Tokens, name: &str) {
     ui.add_space(4.0);
     ui.label(egui::RichText::new(name).color(t.text).strong().size(12.0));
+}
+
+/// Resolve-style rotary knob (perilla) with outer ring, indicator pointer, drag interaction and double-click reset.
+#[allow(clippy::too_many_arguments)]
+fn rotary_knob(
+    ui: &mut egui::Ui,
+    e: &EffectInstance,
+    mt: Tick,
+    id: &'static str,
+    label: &str,
+    short_label: &str,
+    range: (f64, f64),
+    default: f64,
+    speed: f64,
+    decimals: usize,
+    unit: &str,
+    accent_color: Option<Color32>,
+    t: &Tokens,
+    actions: &mut Actions,
+    clip: ClipId,
+    idx: usize,
+) -> Rect {
+    let cur_val = e.param(id).map(|p| p.f64_at(mt)).unwrap_or(default);
+    let (item_r, resp) = ui.allocate_exact_size(vec2(52.0, 68.0), Sense::click_and_drag());
+    let p = ui.painter();
+
+    // Drag interaction
+    let mut new_val = cur_val;
+    if resp.dragged() {
+        let delta = resp.drag_delta();
+        let shift = ui.ctx().input(|i| i.modifiers.shift);
+        let factor = if shift { 0.25 } else { 1.0 };
+        let step = (delta.x - delta.y) as f64 * speed * factor;
+        new_val = (cur_val + step).clamp(range.0, range.1);
+    }
+    if resp.double_clicked() {
+        new_val = default;
+    }
+
+    // Top Label in small caps
+    let label_pos = pos2(item_r.center().x, item_r.min.y + 7.0);
+    p.text(
+        label_pos,
+        Align2::CENTER_CENTER,
+        short_label,
+        Tokens::semibold(9.5),
+        if resp.hovered() { Color32::from_rgb(255, 185, 60) } else { t.text_dim },
+    );
+
+    // Dial Center & Radius
+    let kc = pos2(item_r.center().x, item_r.min.y + 31.0);
+    let radius = 15.5;
+
+    // Outer Dial Ring & Background
+    let is_active = resp.hovered() || resp.dragged();
+    let ring_color = if is_active {
+        Color32::from_rgb(255, 175, 40) // Resolve signature gold
+    } else {
+        Color32::from_rgb(52, 58, 70)
+    };
+    p.circle_filled(kc, radius, Color32::from_rgb(22, 25, 32));
+    p.circle_stroke(kc, radius, Stroke::new(1.5, ring_color));
+
+    // Value Arc
+    let span = (range.1 - range.0).max(1e-4);
+    let norm = ((cur_val - range.0) / span).clamp(0.0, 1.0) as f32;
+    let def_norm = ((default - range.0) / span).clamp(0.0, 1.0) as f32;
+
+    let min_ang = -135f32.to_radians();
+    let max_ang = 135f32.to_radians();
+    let cur_ang = min_ang + norm * (max_ang - min_ang);
+    let def_ang = min_ang + def_norm * (max_ang - min_ang);
+
+    let arc_color = accent_color.unwrap_or_else(|| Color32::from_rgb(60, 140, 240));
+    let arc_steps = 14;
+    let (a_start, a_end) = if cur_ang >= def_ang { (def_ang, cur_ang) } else { (cur_ang, def_ang) };
+    if (a_end - a_start).abs() > 0.02 {
+        let mut prev = kc + vec2(a_start.sin(), -a_start.cos()) * (radius - 3.0);
+        for s in 1..=arc_steps {
+            let f = s as f32 / arc_steps as f32;
+            let a = a_start + f * (a_end - a_start);
+            let pt = kc + vec2(a.sin(), -a.cos()) * (radius - 3.0);
+            p.line_segment([prev, pt], Stroke::new(2.5, arc_color));
+            prev = pt;
+        }
+    }
+
+    // Needle pointer line
+    let pointer_tip = kc + vec2(cur_ang.sin(), -cur_ang.cos()) * (radius - 2.5);
+    let pointer_base = kc + vec2(cur_ang.sin(), -cur_ang.cos()) * 4.0;
+    p.line_segment([pointer_base, pointer_tip], Stroke::new(2.0, Color32::WHITE));
+
+    // Center Hub
+    p.circle_filled(kc, 3.0, Color32::from_rgb(45, 52, 65));
+    p.circle_stroke(kc, 3.0, Stroke::new(1.0, Color32::from_rgb(80, 90, 110)));
+
+    // Bottom numeric readout
+    let val_text = if decimals == 0 {
+        format!("{:.0}{unit}", cur_val)
+    } else {
+        format!("{:.1}{unit}", cur_val)
+    };
+    let val_pos = pos2(item_r.center().x, item_r.max.y - 8.0);
+    let val_color = if (cur_val - default).abs() > 1e-4 {
+        Color32::from_rgb(255, 190, 70) // gold if adjusted
+    } else {
+        t.text_dim
+    };
+    p.text(val_pos, Align2::CENTER_CENTER, val_text, Tokens::ui(9.5), val_color);
+
+    if (new_val - cur_val).abs() > 1e-5 {
+        actions.push(json!({"clip": clip.0, "effect": idx, "param": id, "value": new_val}));
+    }
+
+    resp.on_hover_text(format!("{label}: {cur_val:.1}{unit} (Arrastra o rueda; doble clic para resetear)"));
+    item_r
 }
 
 #[derive(Clone, Copy)]

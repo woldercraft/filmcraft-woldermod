@@ -154,7 +154,12 @@ fn lumetri_lut_menus_and_section_switches() {
     for id in ["lumetri.input_lut", "lumetri.switch.Basic Correction", "lumetri.switch.Creative", "lumetri.switch.Vignette"] {
         assert!(ids.iter().any(|i| i == id), "{id} missing from {ids:?}");
     }
+    println!("NODE 0 RECT: {:?}", d.element("lumetri.node.0"));
+    println!("BASIC RECT: {:?}", d.element("lumetri.section.Basic Correction"));
+    println!("CREATIVE RECT: {:?}", d.element("lumetri.section.Creative"));
     d.click("lumetri.section.Creative");
+    println!("EXPANDED FX: {:?}", d.app().ui.expanded_fx);
+    println!("AFTER CLICK: {:?}", d.ids("lumetri."));
     assert!(d.ids("lumetri.").iter().any(|i| i == "lumetri.look_lut"));
     d.snapshot("color-lumetri-panel", None);
     // clicking a section switch bypasses the section (an undoable engine command)
@@ -447,4 +452,61 @@ fn bottom_navigation_color_page() {
     d.frames(3);
     let inspect = d.ok("ui.inspect", json!({}));
     assert_eq!(inspect["ui"]["mode"], "Export");
+}
+
+#[test]
+fn timeline_clips_selector_and_draggable_nodes() {
+    let mut d = Driver::demo();
+    d.ok("ui.set", json!({"workspace": "Color"}));
+    d.frames(3);
+
+    // 1. Clips selector strip
+    let clip0_elem = d.element("color_clips.index.0").expect("first clip in color clips strip");
+    assert!(clip0_elem[2] > 50.0);
+    assert!(d.element("color_clips.next").is_some());
+    assert!(d.element("color_clips.prev").is_some());
+
+    // Click next clip button in strip
+    let initial_ph = d.app().session.playhead();
+    d.click("color_clips.next");
+    d.frames(2);
+    let next_ph = d.app().session.playhead();
+    assert!(next_ph > initial_ph, "playhead should seek forward to next clip");
+
+    // Click back to first clip via index.0
+    d.click("color_clips.index.0");
+    d.frames(2);
+    assert_eq!(d.app().session.playhead(), filmcraft_time::Tick(0), "playhead should seek to clip 0 start");
+
+    // 2. Rotary Knobs (Perillas) in Primaries
+    let first_clip = select_first_clip(&mut d);
+    d.exec("effects.apply", json!({"clips": [first_clip], "effect": "lumetri"}));
+    d.frames(2);
+    assert!(d.element("lumetri.knob.temperature").is_some());
+    assert!(d.element("lumetri.knob.contrast").is_some());
+    assert!(d.element("lumetri.knob.saturation").is_some());
+
+    // 3. Draggable color nodes
+    d.click("color_nodes.add_serial");
+    d.frames(2);
+    let node0_initial = d.element("color_nodes.node.0").expect("node 0 rect");
+
+    // Drag node 0 by 40px right, 30px down
+    d.ok(
+        "ui.drag",
+        json!({
+            "from": {"x": node0_initial[0] + 20.0, "y": node0_initial[1] + 20.0},
+            "to": {"x": node0_initial[0] + 60.0, "y": node0_initial[1] + 50.0},
+            "steps": 4
+        }),
+    );
+    d.frames(2);
+
+    let key = format!("{}:0", first_clip);
+    assert!(d.app().ui.color_node_positions.contains_key(&key), "dragged position should be recorded");
+
+    // Click organize to reset layout
+    d.click("color_nodes.organize");
+    d.frames(2);
+    assert!(!d.app().ui.color_node_positions.contains_key(&key), "organize should clear custom positions");
 }

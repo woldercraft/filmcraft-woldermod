@@ -507,6 +507,9 @@ pub struct UiState {
     /// User custom labels for color nodes (`clip:node_index` -> label).
     #[serde(default)]
     pub color_node_labels: std::collections::HashMap<String, String>,
+    /// Freely movable positions for color nodes in graph (`clip:node_index` -> [x, y] relative to canvas).
+    #[serde(default)]
+    pub color_node_positions: std::collections::HashMap<String, [f32; 2]>,
     /// Text to Speech panel: the script and voice settings being written or edited.
     #[serde(default)]
     pub tts: crate::panels::tts::TtsDraft,
@@ -1016,6 +1019,7 @@ impl Default for UiState {
             essential_sound_tab: "Edit".into(),
             active_color_node: 0,
             color_node_labels: std::collections::HashMap::new(),
+            color_node_positions: std::collections::HashMap::new(),
             tts: Default::default(),
             export: Default::default(),
             project_browser: Default::default(),
