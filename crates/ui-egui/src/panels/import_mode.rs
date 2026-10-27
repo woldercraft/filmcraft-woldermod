@@ -9,6 +9,27 @@ use crate::theme::Tokens;
 
 pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     super::project_manager::show(app, ui, rect);
+    recent_automation_bridge(app, ui, rect);
+}
+
+fn recent_automation_bridge(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
+    let paths: Vec<String> = app.session.prefs.general.recent_projects.iter().take(RECENT_ROWS).cloned().collect();
+    let mut open = None;
+    for (i, path) in paths.iter().enumerate() {
+        let name = crate::menus::recent_name(path);
+        let row = Rect::from_min_size(pos2(rect.min.x + 4.0 + i as f32 * 20.0, rect.max.y - 12.0), vec2(16.0, 10.0));
+        let resp = ui.interact(row, egui::Id::new(("auto-imp-recent", i)), Sense::click());
+        app.auto.add(&format!("import.recent.{i}"), row, &name);
+        if resp.clicked() {
+            open = Some(path.clone());
+        }
+    }
+    if let Some(path) = open {
+        let ctx = ui.ctx().clone();
+        if crate::menus::invoke(app, &ctx, "file.open", json!({"path": path})).is_ok() {
+            app.ui.mode = crate::state::Mode::Edit;
+        }
+    }
 }
 
 #[allow(dead_code)]

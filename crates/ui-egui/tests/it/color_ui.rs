@@ -364,3 +364,87 @@ fn lumetri_rows_keep_their_width_when_the_clip_name_is_long() {
     let long = d.element("lumetri.param.hdr_white").expect("hdr_white row");
     assert_eq!(short, long, "a long clip name must not move or widen the control rows");
 }
+
+#[test]
+fn color_nodes_graph_and_actions() {
+    let mut d = Driver::demo();
+    d.ok("ui.set", json!({"workspace": "Color"}));
+    d.frames(3);
+    let clip = select_first_clip(&mut d);
+
+    // Initial prompt to add node when none exists yet
+    let init_ids = d.ids("color_nodes.");
+    assert!(init_ids.iter().any(|i| i == "color_nodes.init_node"), "{init_ids:?}");
+
+    // Click init_node to add first serial node
+    d.click("color_nodes.init_node");
+    d.frames(3);
+    let ids_with_one = d.ids("color_nodes.");
+    assert!(ids_with_one.iter().any(|i| i == "color_nodes.node.0"), "{ids_with_one:?}");
+
+    // Add serial node
+    d.click("color_nodes.add_serial");
+    d.frames(3);
+    let ids_after_add = d.ids("color_nodes.");
+    assert!(ids_after_add.iter().any(|i| i == "color_nodes.node.1"), "{ids_after_add:?}");
+
+    // Toggle bypass on node 1
+    d.click("color_nodes.node.1.power");
+    d.frames(2);
+    let seq = d.exec("sequence.inspect", json!({}));
+    let items = seq["video"][0]["items"].as_array().unwrap().clone();
+    let it = items.into_iter().find(|i| i["clip"] == clip).unwrap();
+    let lumetris: Vec<_> = it["effects"].as_array().unwrap().iter().filter(|e| e["effect"] == "lumetri").collect();
+    assert_eq!(lumetris.len(), 2);
+    assert_eq!(lumetris[1]["enabled"], false);
+
+    // Bypass all
+    d.click("color_nodes.bypass_all");
+    d.frames(2);
+    let seq = d.exec("sequence.inspect", json!({}));
+    let it = seq["video"][0]["items"].as_array().unwrap().iter().find(|i| i["clip"] == clip).unwrap().clone();
+    let lumetris: Vec<_> = it["effects"].as_array().unwrap().iter().filter(|e| e["effect"] == "lumetri").collect();
+    assert!(lumetris.iter().all(|e| !e["enabled"].as_bool().unwrap()));
+
+    // Delete node
+    d.click("color_nodes.node.1");
+    d.frames(2);
+    d.click("color_nodes.delete_node");
+    d.frames(2);
+    let seq = d.exec("sequence.inspect", json!({}));
+    let it = seq["video"][0]["items"].as_array().unwrap().iter().find(|i| i["clip"] == clip).unwrap().clone();
+    let lumetris: Vec<_> = it["effects"].as_array().unwrap().iter().filter(|e| e["effect"] == "lumetri").collect();
+    assert_eq!(lumetris.len(), 1);
+}
+
+#[test]
+fn bottom_navigation_color_page() {
+    let mut d = Driver::demo();
+    d.frames(3);
+
+    // Click Color on bottom bar
+    d.click("bottom_nav.color");
+    d.frames(3);
+    let inspect = d.ok("ui.inspect", json!({}));
+    assert_eq!(inspect["ui"]["workspace"], "Color");
+    assert_eq!(inspect["ui"]["mode"], "Edit");
+
+    // Click Edit on bottom bar
+    d.click("bottom_nav.edit");
+    d.frames(3);
+    let inspect = d.ok("ui.inspect", json!({}));
+    assert_eq!(inspect["ui"]["workspace"], "Editing");
+    assert_eq!(inspect["ui"]["mode"], "Edit");
+
+    // Click Projects on bottom bar
+    d.click("bottom_nav.projects");
+    d.frames(3);
+    let inspect = d.ok("ui.inspect", json!({}));
+    assert_eq!(inspect["ui"]["mode"], "Import");
+
+    // Click Export on bottom bar
+    d.click("bottom_nav.export");
+    d.frames(3);
+    let inspect = d.ok("ui.inspect", json!({}));
+    assert_eq!(inspect["ui"]["mode"], "Export");
+}

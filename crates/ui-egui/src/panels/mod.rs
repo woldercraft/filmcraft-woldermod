@@ -4,6 +4,7 @@
 pub mod audio_fx_editor;
 pub mod clip_dialogs;
 pub mod color_dialogs;
+pub mod color_nodes;
 pub mod dialogs;
 pub mod effect_controls;
 pub mod effects;
@@ -108,6 +109,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rect)
         PanelKind::TextToSpeech => tts::show(app, ui, rect),
         PanelKind::ProjectNotes => notes::show(app, ui, rect),
         PanelKind::MacroTimeline => macro_timeline::show(app, ui, rect),
+        PanelKind::ColorNodes => color_nodes::show(app, ui, rect),
         other => crate::dock::placeholder(ui, rect, &app.tokens, &tlf!("{panel} — coming in a later milestone", panel = crate::i18n::t(other.title()))),
     }
 }

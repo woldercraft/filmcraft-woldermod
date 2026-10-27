@@ -501,6 +501,12 @@ pub struct UiState {
     /// Essential Sound sub-tab: "Edit" or "Browse".
     #[serde(default)]
     pub essential_sound_tab: String,
+    /// Active Lumetri color node index for node-based grading (0-indexed).
+    #[serde(default)]
+    pub active_color_node: usize,
+    /// User custom labels for color nodes (`clip:node_index` -> label).
+    #[serde(default)]
+    pub color_node_labels: std::collections::HashMap<String, String>,
     /// Text to Speech panel: the script and voice settings being written or edited.
     #[serde(default)]
     pub tts: crate::panels::tts::TtsDraft,
@@ -1008,6 +1014,8 @@ impl Default for UiState {
             eyedropper: None,
             keyframe_selection: Vec::new(),
             essential_sound_tab: "Edit".into(),
+            active_color_node: 0,
+            color_node_labels: std::collections::HashMap::new(),
             tts: Default::default(),
             export: Default::default(),
             project_browser: Default::default(),

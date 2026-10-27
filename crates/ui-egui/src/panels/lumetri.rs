@@ -20,31 +20,49 @@ use crate::theme::Tokens;
 
 type Actions = Vec<Value>;
 
-fn selected(app: &FilmcraftApp) -> Option<(ClipId, filmcraft_project::TrackItem)> {
+pub fn active_color_clip(app: &FilmcraftApp) -> Option<(ClipId, filmcraft_project::TrackItem)> {
     let seq = app.session.active_sequence()?;
-    app.session.state.selection.iter().find_map(|c| {
+    if let Some(res) = app.session.state.selection.iter().find_map(|c| {
         let (tid, it) = seq.find_item(*c)?;
         (seq.track(tid)?.kind == filmcraft_project::TrackKind::Video).then(|| (*c, it.clone()))
-    })
+    }) {
+        return Some(res);
+    }
+    let ph = app.session.playhead();
+    for track in seq.video_tracks.iter().rev() {
+        if !track.locked && !track.muted {
+            for item in &track.items {
+                if item.start <= ph && ph < item.end() {
+                    return Some((item.id, item.clone()));
+                }
+            }
+        }
+    }
+    None
 }
 
 pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
-    let Some((clip, it)) = selected(app) else {
+    let Some((clip, it)) = active_color_clip(app) else {
         crate::dock::placeholder(ui, rect, &t, tl!("(no clip selected)"));
         return;
     };
     let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(12.0, 6.0))).id_salt("lumetri2"));
-    let Some(idx) = it.effects.iter().position(|e| e.effect == "lumetri") else {
+    let lumetri_effects: Vec<(usize, &EffectInstance)> = it.effects.iter().enumerate().filter(|(_, e)| e.effect == "lumetri").collect();
+    if lumetri_effects.is_empty() {
         bui.add_space(8.0);
         bui.label(egui::RichText::new(tlf!("Master · {name}", name = it.name)).color(t.text_dim));
         bui.add_space(8.0);
         if bui.button(tl!("Add Lumetri Color to clip")).clicked() {
             let _ = app.session.execute("effects.apply", json!({"clips": [clip.0], "effect": "lumetri"}));
+            app.ui.active_color_node = 0;
         }
         return;
-    };
-    let e = it.effects[idx].clone();
+    }
+    let active_node = app.ui.active_color_node.min(lumetri_effects.len().saturating_sub(1));
+    app.ui.active_color_node = active_node;
+    let (idx, e_ref) = lumetri_effects[active_node];
+    let e = e_ref.clone();
     // HDR mode: the sequence's working space is Rec. 2100 PQ or HLG
     let hdr = app.session.active_sequence().is_some_and(|q| q.settings.color.working.is_hdr());
     let mut auto_rows: Vec<(String, Rect, &'static str)> = Vec::new();
@@ -64,6 +82,38 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             });
         });
     });
+
+    // DaVinci Resolve-style Node switcher bar: [ Node 01 ✓ ] [ Node 02 ] [ + ]
+    bui.horizontal(|ui| {
+        ui.label(egui::RichText::new(tl!("Node:")).color(t.text_dim).small());
+        for (n_idx, &(_fx_i, fx_inst)) in lumetri_effects.iter().enumerate() {
+            let is_curr = n_idx == active_node;
+            let node_num = format!("{:02}", n_idx + 1);
+            let custom_name = app.ui.color_node_labels.get(&format!("{}:{n_idx}", clip.0)).cloned();
+            let label = custom_name.unwrap_or_else(|| format!("Node {node_num}"));
+            let text = if fx_inst.enabled {
+                format!("{label} ✓")
+            } else {
+                format!("{label} ✗")
+            };
+            let mut btn = egui::Button::new(egui::RichText::new(text).small());
+            if is_curr {
+                btn = btn.fill(t.accent.gamma_multiply(0.25)).stroke(egui::Stroke::new(1.0, t.accent));
+            }
+            let resp = ui.add(btn);
+            app.auto.add(&format!("lumetri.node.{n_idx}"), resp.rect, &label);
+            if resp.clicked() {
+                app.ui.active_color_node = n_idx;
+            }
+        }
+        let add_btn = ui.button(egui::RichText::new("+").small()).on_hover_text(tl!("Add Serial Node (Alt+S)"));
+        app.auto.add("lumetri.node.add", add_btn.rect, "Add Serial Node");
+        if add_btn.clicked() {
+            let _ = app.session.execute("effects.apply", json!({"clips": [clip.0], "effect": "lumetri"}));
+            app.ui.active_color_node = lumetri_effects.len();
+        }
+    });
+    bui.add_space(2.0);
     let set = |actions: &mut Actions, param: &str, v: Value| actions.push(json!({"clip": clip.0, "effect": idx, "param": param, "value": v}));
     let mut sections: Vec<&'static str> = Vec::new();
     let mut lut_actions: Vec<(&'static str, Value)> = Vec::new();

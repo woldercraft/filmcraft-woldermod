@@ -41,10 +41,11 @@ pub enum PanelKind {
     Timecode,
     ProjectNotes,
     MacroTimeline,
+    ColorNodes,
 }
 
 impl PanelKind {
-    pub const ALL: [PanelKind; 29] = [
+    pub const ALL: [PanelKind; 30] = [
         PanelKind::Project,
         PanelKind::MediaBrowser,
         PanelKind::Libraries,
@@ -74,6 +75,7 @@ impl PanelKind {
         PanelKind::Timecode,
         PanelKind::ProjectNotes,
         PanelKind::MacroTimeline,
+        PanelKind::ColorNodes,
     ];
     pub fn title(self) -> &'static str {
         match self {
@@ -106,6 +108,7 @@ impl PanelKind {
             PanelKind::Timecode => "Timecode",
             PanelKind::ProjectNotes => "Project Notes",
             PanelKind::MacroTimeline => "Macro Timeline",
+            PanelKind::ColorNodes => "Color Nodes",
         }
     }
     pub fn id(self) -> String {
@@ -329,7 +332,7 @@ pub fn workspace(name: &str) -> DockNode {
             FixedB(340.0),
             vsplit(
                 Ratio(0.58),
-                hsplit(Ratio(0.42), tabs(&[LumetriScopes, Source, EffectControls], 0), tabs(&[Program], 0)),
+                hsplit(Ratio(0.45), tabs(&[ColorNodes, LumetriScopes, Source, EffectControls], 0), tabs(&[Program], 0)),
                 hsplit(Ratio(0.3), tabs(&[Project, Info, Markers, History], 0), bottom_editing()),
             ),
             tabs(&[LumetriColor, Effects], 0),

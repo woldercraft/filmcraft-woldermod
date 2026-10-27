@@ -1917,11 +1917,12 @@ impl FilmcraftApp {
             }
         }
 
-        // Center: DaVinci Resolve bottom page navigation (Proyectos, Edición, Exportación)
-        let nav_items = [
-            (state::Mode::Import, "Projects", tl!("Projects"), icons::Icon::Folder),
-            (state::Mode::Edit, "Edit", tl!("Edit"), icons::Icon::Film),
-            (state::Mode::Export, "Export", tl!("Export"), icons::Icon::Export),
+        // Center: DaVinci Resolve bottom page navigation (Proyectos, Edición, Color, Exportación)
+        let nav_items: [(&str, &str, icons::Icon); 4] = [
+            ("projects", tl!("Projects"), icons::Icon::Folder),
+            ("edit", tl!("Edit"), icons::Icon::Film),
+            ("color", tl!("Color"), icons::Icon::Adjust),
+            ("export", tl!("Export"), icons::Icon::Export),
         ];
         let total_tabs_w = nav_items.len() as f32 * 110.0;
         let mut tab_x = (sb.center().x - total_tabs_w / 2.0).max(sb.min.x + 200.0);
@@ -1938,12 +1939,18 @@ impl FilmcraftApp {
                 self.ui.status.clear();
             }
         }
-        for (m, id, label, icon) in nav_items {
-            let active = self.ui.mode == m;
+        for (id, label, icon) in nav_items {
+            let active = match id {
+                "projects" => self.ui.mode == state::Mode::Import,
+                "edit" => self.ui.mode == state::Mode::Edit && self.ui.workspace != "Color",
+                "color" => self.ui.mode == state::Mode::Edit && self.ui.workspace == "Color",
+                "export" => self.ui.mode == state::Mode::Export,
+                _ => false,
+            };
             let tab_r = egui::Rect::from_min_size(egui::pos2(tab_x, sb.min.y + 2.0), egui::vec2(104.0, sb.height() - 4.0));
             let tresp = ui.interact(tab_r, egui::Id::new(("bottom_nav", id)), egui::Sense::click());
-            self.auto.add(&format!("header.mode.{}", id.to_ascii_lowercase()), tab_r, label);
-            self.auto.add(&format!("bottom_nav.{}", id.to_ascii_lowercase()), tab_r, label);
+            self.auto.add(&format!("header.mode.{}", id), tab_r, label);
+            self.auto.add(&format!("bottom_nav.{}", id), tab_r, label);
 
             if tresp.hovered() {
                 ui.painter().rect_filled(tab_r, 4.0, t.hover);
@@ -1962,7 +1969,21 @@ impl FilmcraftApp {
             ui.painter().text(egui::pos2(tab_r.min.x + 32.0, tab_r.center().y), egui::Align2::LEFT_CENTER, label, Tokens::ui(12.0), col);
 
             if tresp.clicked() {
-                self.ui.mode = m;
+                match id {
+                    "projects" => self.ui.mode = state::Mode::Import,
+                    "edit" => {
+                        self.ui.mode = state::Mode::Edit;
+                        if self.ui.workspace == "Color" {
+                            self.set_workspace("Editing");
+                        }
+                    }
+                    "color" => {
+                        self.ui.mode = state::Mode::Edit;
+                        self.set_workspace("Color");
+                    }
+                    "export" => self.ui.mode = state::Mode::Export,
+                    _ => {}
+                }
             }
             tab_x += 110.0;
         }
