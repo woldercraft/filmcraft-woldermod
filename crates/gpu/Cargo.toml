@@ -21,6 +21,9 @@ log = { workspace = true }
 pollster = "1"
 rayon = { workspace = true }
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["wgsl", "metal", "vulkan", "dx12", "gles"] }
+
 [dev-dependencies]
 pollster = "1"
 filmcraft-export = { workspace = true }

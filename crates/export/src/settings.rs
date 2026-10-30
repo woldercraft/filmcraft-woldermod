@@ -91,6 +91,21 @@ pub enum GpuRendering {
     Off,
 }
 
+/// Where the picture is converted from RGB to the encoder's YUV 4:2:0 (NV12) layout.
+///
+/// Auto = the fastest route: when the frame is composited on the GPU and the encoder is a
+/// hardware encoder that takes NV12 (VA-API), the GPU converts to BT.709 limited-range NV12 and
+/// only that (3 bytes per 2 pixels instead of 4 per pixel) crosses back to the CPU. Frames the
+/// GPU cannot convert (limiter, overlays, odd sizes, HDR) use the CPU route automatically.
+/// Cpu = always read back RGBA and convert on the CPU, as before. Both routes give the same bytes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ColorConversion {
+    #[default]
+    Auto,
+    Cpu,
+}
+
 /// Bitrate encoding of bitrate-driven codecs (H.264).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

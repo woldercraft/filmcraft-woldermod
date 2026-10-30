@@ -185,7 +185,8 @@ impl<A: Accel> Front<A> {
     }
 
     fn handle_slice(&mut self, nal: &[u8], hdr: NalHeader, pts: i64, frames: &mut Vec<DecodedFrame>) -> Result<()> {
-        let rbsp = unescape_rbsp(nal.get(2..).unwrap_or_default());
+        let payload = nal.get(2..).unwrap_or_default();
+        let rbsp = unescape_rbsp(&payload[..payload.len().min(4096)]);
         let first = rbsp.first().is_some_and(|b| b & 0x80 != 0);
         if first {
             self.submit_pending(frames)?;
@@ -195,18 +196,22 @@ impl<A: Accel> Front<A> {
         }
         let (ppss, spss) = (&self.ppss, &self.spss);
         let prev = self.pending.as_ref().map(|p| &p.last);
-        let (sh, pps, sps) = SliceHeader::parse(
-            &rbsp,
-            hdr,
-            |id| {
-                let missing = |what: String| filmcraft_hevc::Error::MissingParameterSet(what);
-                let pps = ppss.get(id as usize).and_then(Option::as_ref).ok_or_else(|| missing(format!("PPS {id}")))?;
-                let sps = spss.get(pps.sps_id as usize).and_then(Option::as_ref).ok_or_else(|| missing(format!("SPS {}", pps.sps_id)))?;
-                Ok((pps.clone(), sps.clone()))
-            },
-            prev,
-        )
-        .map_err(decode_err)?;
+        let parse_hdr = |buf: &[u8]| {
+            SliceHeader::parse(
+                buf,
+                hdr,
+                |id| {
+                    let missing = |what: String| filmcraft_hevc::Error::MissingParameterSet(what);
+                    let pps = ppss.get(id as usize).and_then(Option::as_ref).ok_or_else(|| missing(format!("PPS {id}")))?;
+                    let sps = spss.get(pps.sps_id as usize).and_then(Option::as_ref).ok_or_else(|| missing(format!("SPS {}", pps.sps_id)))?;
+                    Ok((pps.clone(), sps.clone()))
+                },
+                prev,
+            )
+        };
+        let (sh, pps, sps) = parse_hdr(&rbsp)
+            .or_else(|e| if payload.len() > 4096 { parse_hdr(&unescape_rbsp(payload)) } else { Err(e) })
+            .map_err(decode_err)?;
         sps.check_supported().map_err(decode_err)?;
         pps.check_supported().map_err(decode_err)?;
         if first {

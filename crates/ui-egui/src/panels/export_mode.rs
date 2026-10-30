@@ -23,7 +23,7 @@
 use egui::{Align2, Color32, Rect, Sense, pos2, vec2};
 use filmcraft_engine::export::presets::{DEFAULT_PRESET, preset_key};
 use filmcraft_engine::export::{
-    AudioCodec, BitrateMode, ExportSettings, ExrCompression, FieldOrder, Format, GpuRendering, H264Profile, HardwareEncoding, Multiplexer, MxfVideoCodec,
+    AudioCodec, BitrateMode, ColorConversion, ExportSettings, ExrCompression, FieldOrder, Format, GpuRendering, H264Profile, HardwareEncoding, Multiplexer, MxfVideoCodec,
     Placement, SampleFormat, Scaling, TextOverlay, builtin_presets, format_bytes,
 };
 use filmcraft_engine::time::{FrameRate, Tick};
@@ -81,7 +81,9 @@ pub struct ExportUi {
 
 impl Default for ExportUi {
     fn default() -> Self {
-        let preset = filmcraft_engine::export::presets::find_builtin(DEFAULT_PRESET).map(|p| p.settings).unwrap_or_default();
+        let mut preset = filmcraft_engine::export::presets::find_builtin(DEFAULT_PRESET).map(|p| p.settings).unwrap_or_default();
+        preset.gpu_rendering = filmcraft_export::GpuRendering::Auto;
+        preset.hardware_encoding = filmcraft_export::HardwareEncoding::Auto;
         ExportUi {
             preset: DEFAULT_PRESET.into(),
             settings: preset,
@@ -134,7 +136,9 @@ fn settings_json(s: &ExportSettings) -> Value {
 /// Apply a preset by name (from the engine's library).
 pub fn apply_preset(app: &mut FilmcraftApp, name: &str) -> bool {
     match app.session.export_presets.find(name) {
-        Some(p) => {
+        Some(mut p) => {
+            p.settings.gpu_rendering = filmcraft_export::GpuRendering::Auto;
+            p.settings.hardware_encoding = filmcraft_export::HardwareEncoding::Auto;
             app.ui.export.settings = p.settings;
             app.ui.export.preset = p.name;
             true

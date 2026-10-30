@@ -24,7 +24,7 @@ pub mod through;
 pub mod transcript;
 pub mod transitions;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use filmcraft_project::{ClipId, ItemId, Sequence, Track, TrackId, TrackItem, Transition, TransitionAlign, TransitionId};
 use filmcraft_time::{Tick, TimeRange};
@@ -93,7 +93,10 @@ pub enum TrimMode {
 /// `links` maps old link groups to the new group for right-hand pieces (so linked partners split
 /// in the same operation stay linked to each other).
 pub fn split_track_at(track: &mut Track, t: Tick, ctx: &mut EditCtx, links: &mut HashMap<u64, u64>) -> Option<ClipId> {
-    let idx = track.items.iter().position(|i| i.start < t && t < i.end())?;
+    let idx = track.items.partition_point(|i| i.start <= t).checked_sub(1)?;
+    if !(track.items[idx].start < t && t < track.items[idx].end()) {
+        return None;
+    }
     let left = &mut track.items[idx];
     let mut right = left.clone();
     let cut = t - left.start;
@@ -178,6 +181,9 @@ pub fn track_range_empty(track: &Track, range: TimeRange) -> bool {
 
 /// Drop transitions whose clips no longer exist or are no longer adjacent to them.
 pub fn remove_orphan_transitions(track: &mut Track) {
+    if track.transitions.is_empty() {
+        return;
+    }
     let ids: HashMap<ClipId, (Tick, Tick)> = track.items.iter().map(|i| (i.id, (i.start, i.end()))).collect();
     track.transitions.retain(|tr| {
         let from_ok = tr.from.is_none_or(|f| ids.contains_key(&f));
@@ -306,17 +312,61 @@ fn unlocked_track(seq: &Sequence, clip: ClipId) -> Result<TrackId> {
 /// Overwrite edits: each item replaces material on its track.
 pub fn overwrite(seq: &mut Sequence, placements: Vec<(TrackId, TrackItem)>, ctx: &mut EditCtx) -> Result<Vec<ClipId>> {
     let mut links = HashMap::new();
-    let mut ids = Vec::new();
+    let mut ids = Vec::with_capacity(placements.len());
     for (tid, _) in &placements {
         if track_mut(seq, *tid)?.locked {
             return Err(EditError::Locked);
         }
     }
+    let mut by_track: HashMap<TrackId, Vec<TrackItem>> = HashMap::new();
     for (tid, item) in placements {
-        let t = track_mut(seq, tid)?;
-        clear_track_range(t, item.range(), ctx, &mut links);
         ids.push(item.id);
-        place(t, item);
+        by_track.entry(tid).or_default().push(item);
+    }
+    for (tid, mut items) in by_track {
+        let t = track_mut(seq, tid)?;
+        if t.items.is_empty() {
+            t.items = items;
+            t.items.sort_unstable_by_key(|i| i.start);
+        } else if items.len() > 16 {
+            items.sort_unstable_by_key(|i| i.start);
+            for item in &items {
+                if item.duration.0 <= 0 {
+                    continue;
+                }
+                split_track_at(t, item.start, ctx, &mut links);
+                split_track_at(t, item.end(), ctx, &mut links);
+            }
+            let mut merged_ranges: Vec<TimeRange> = Vec::with_capacity(items.len());
+            for item in &items {
+                let r = item.range();
+                if let Some(last) = merged_ranges.last_mut()
+                    && r.start <= last.end()
+                {
+                    *last = TimeRange::from_bounds(last.start, last.end().max(r.end()));
+                    continue;
+                }
+                merged_ranges.push(r);
+            }
+            t.items.retain(|i| {
+                let idx = merged_ranges.partition_point(|r| r.end() <= i.start);
+                if idx < merged_ranges.len() {
+                    let r = &merged_ranges[idx];
+                    if i.start >= r.start && i.end() <= r.end() {
+                        return false;
+                    }
+                }
+                true
+            });
+            t.items.extend(items);
+            t.items.sort_unstable_by_key(|i| i.start);
+            remove_orphan_transitions(t);
+        } else {
+            for item in items {
+                clear_track_range(t, item.range(), ctx, &mut links);
+                place(t, item);
+            }
+        }
     }
     Ok(ids)
 }
@@ -369,7 +419,8 @@ pub fn razor(seq: &mut Sequence, tracks: &[TrackId], t: Tick, ctx: &mut EditCtx)
 
 /// Razor only the given items (and their linked partners if listed) at `t`.
 pub fn razor_items(seq: &mut Sequence, items: &[ClipId], t: Tick, ctx: &mut EditCtx) -> Vec<ClipId> {
-    let tracks: Vec<TrackId> = items.iter().filter_map(|c| seq.find_item(*c).map(|(tid, _)| tid)).collect();
+    let item_set: HashSet<ClipId> = items.iter().copied().collect();
+    let tracks: HashSet<TrackId> = items.iter().filter_map(|c| seq.find_item(*c).map(|(tid, _)| tid)).collect();
     let mut links = HashMap::new();
     let mut out = Vec::new();
     for tr in seq.all_tracks_mut() {
@@ -377,7 +428,7 @@ pub fn razor_items(seq: &mut Sequence, items: &[ClipId], t: Tick, ctx: &mut Edit
             continue;
         }
         // only split if the item at t is one of ours
-        if tr.item_at(t).is_some_and(|i| items.contains(&i.id))
+        if tr.item_at(t).is_some_and(|i| item_set.contains(&i.id))
             && let Some(id) = split_track_at(tr, t, ctx, &mut links)
         {
             out.push(id);
@@ -489,9 +540,11 @@ fn merged(mut ranges: Vec<TimeRange>) -> Vec<TimeRange> {
 /// tracks covers all of their time): that would be a plain delete.
 pub fn ripple_delete_items(seq: &mut Sequence, items: &[ClipId]) -> Result<Vec<TimeRange>> {
     // Collect the tracks that lose an item; the gaps close right-to-left.
-    let mut affected: Vec<TrackId> = Vec::new();
+    let item_tracks: HashMap<ClipId, TrackId> =
+        seq.all_tracks().flat_map(|t| t.items.iter().map(move |i| (i.id, t.id))).collect();
+    let mut affected: Vec<TrackId> = Vec::with_capacity(items.len());
     for c in items {
-        let (tid, _) = seq.find_item(*c).ok_or(EditError::NoItem(*c))?;
+        let tid = *item_tracks.get(c).ok_or(EditError::NoItem(*c))?;
         affected.push(tid);
     }
     let spans = ripple_delete_spans(seq, items);
@@ -499,6 +552,7 @@ pub fn ripple_delete_items(seq: &mut Sequence, items: &[ClipId]) -> Result<Vec<T
         let locked = affected.iter().all(|t| seq.track(*t).is_some_and(|tr| tr.locked));
         return Err(if locked { EditError::Locked } else { EditError::Other("no gap can close: other clips on these tracks cover the deleted time".into()) });
     }
+    let affected_set: HashSet<TrackId> = affected.into_iter().collect();
     let mut work = seq.clone();
     delete_items(&mut work, items);
     for span in spans.iter().rev() {
@@ -507,7 +561,7 @@ pub fn ripple_delete_items(seq: &mut Sequence, items: &[ClipId]) -> Result<Vec<T
             if tr.locked {
                 continue;
             }
-            let on_affected = affected.contains(&tr.id);
+            let on_affected = affected_set.contains(&tr.id);
             if !on_affected && !tr.sync_lock {
                 continue;
             }
@@ -563,10 +617,12 @@ pub fn move_items(seq: &mut Sequence, moves: &[(ClipId, TrackId, Tick)], insert_
         }
     }
     let mut work = seq.clone();
-    let mut placed = Vec::new();
+    let item_map: HashMap<ClipId, (TrackId, TrackItem)> =
+        work.all_tracks().flat_map(|t| t.items.iter().map(move |i| (i.id, (t.id, i.clone())))).collect();
+    let mut placed = Vec::with_capacity(moves.len());
     for (c, dest, start) in moves {
-        let (src, it) = work.find_item(*c).ok_or(EditError::NoItem(*c))?;
-        if work.track(src).is_some_and(|t| t.locked) {
+        let (src, it) = item_map.get(c).ok_or(EditError::NoItem(*c))?;
+        if work.track(*src).is_some_and(|t| t.locked) {
             return Err(EditError::Locked);
         }
         let mut it = it.clone();
@@ -602,9 +658,11 @@ pub fn move_items(seq: &mut Sequence, moves: &[(ClipId, TrackId, Tick)], insert_
 /// the order of `moves`.
 pub fn copy_items(seq: &mut Sequence, moves: &[(ClipId, TrackId, Tick)], insert_mode: bool, ctx: &mut EditCtx) -> Result<Vec<ClipId>> {
     let mut work = seq.clone();
-    let mut placed = Vec::new();
+    let item_map: HashMap<ClipId, TrackItem> =
+        work.all_tracks().flat_map(|t| t.items.iter().map(|i| (i.id, i.clone()))).collect();
+    let mut placed = Vec::with_capacity(moves.len());
     for (c, dest, start) in moves {
-        let (_, it) = work.find_item(*c).ok_or(EditError::NoItem(*c))?;
+        let it = item_map.get(c).ok_or(EditError::NoItem(*c))?;
         let mut it = it.clone();
         if work.track(*dest).ok_or(EditError::NoTrack(*dest))?.locked {
             return Err(EditError::Locked);
@@ -655,10 +713,15 @@ pub fn copy_items(seq: &mut Sequence, moves: &[(ClipId, TrackId, Tick)], insert_
 /// move together), shifted to where those clips land. A transition whose partner stays behind is
 /// dropped, as in Premiere (the drag preview leaves it where it is until the release).
 fn carried_transitions(seq: &Sequence, placed: &[(TrackId, TrackItem)]) -> Vec<(TrackId, Transition)> {
+    if !seq.all_tracks().any(|t| !t.locked && !t.transitions.is_empty()) {
+        return Vec::new();
+    }
+    let placed_map: HashMap<ClipId, (TrackId, Tick)> = placed.iter().map(|(dest, it)| (it.id, (*dest, it.start))).collect();
+    let old_starts: HashMap<ClipId, Tick> = seq.all_tracks().flat_map(|t| t.items.iter().map(|i| (i.id, i.start))).collect();
     let landing = |c: ClipId| {
-        let (dest, it) = placed.iter().find(|(_, it)| it.id == c)?;
-        let (_, old) = seq.find_item(c)?;
-        Some((*dest, it.start - old.start))
+        let &(dest, new_start) = placed_map.get(&c)?;
+        let &old_start = old_starts.get(&c)?;
+        Some((dest, new_start - old_start))
     };
     let mut carried = Vec::new();
     for tr in seq.all_tracks().filter(|t| !t.locked).flat_map(|t| t.transitions.iter()) {

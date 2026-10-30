@@ -225,6 +225,7 @@ fn set_section(s: &mut Session, p: &Value) -> Result<Value> {
         "wheels" | "color wheels" | "color wheels & match" => "wheels_on",
         "hsl" | "hsl secondary" => "hsl_on",
         "vignette" => "vignette_on",
+        "masks" | "power windows" | "power windows / máscara" => "masks_on",
         o => return Err(bad("lumetri.setSection", format!("unknown section `{o}`"))),
     };
     let (clip, idx) = lumetri_clip(s, p, "lumetri.setSection")?;

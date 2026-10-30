@@ -49,7 +49,21 @@ pub fn target_clip(s: &Session, p: &Value) -> Option<ClipId> {
     if let Some(c) = u64_p(p, "clip").map(ClipId) {
         return is_graphic(s, seq, c).then_some(c);
     }
-    if let Some(c) = s.state.selection.iter().copied().find(|c| is_graphic(s, seq, *c)) {
+    if !s.project.items.values().any(|it| matches!(it.kind, ItemKind::Graphic { .. })) {
+        return None;
+    }
+    if s.state.selection.len() > 16 {
+        let graphic_clips: std::collections::HashSet<ClipId> = seq
+            .video_tracks
+            .iter()
+            .flat_map(|t| t.items.iter())
+            .filter(|it| s.project.item(it.item).is_some_and(|p| matches!(p.kind, ItemKind::Graphic { .. })))
+            .map(|it| it.id)
+            .collect();
+        if let Some(c) = s.state.selection.iter().copied().find(|c| graphic_clips.contains(c)) {
+            return Some(c);
+        }
+    } else if let Some(c) = s.state.selection.iter().copied().find(|c| is_graphic(s, seq, *c)) {
         return Some(c);
     }
     let t = s.playhead();

@@ -3,7 +3,9 @@
 
 pub mod audio_fx_editor;
 pub mod clip_dialogs;
+pub mod color_clips;
 pub mod color_dialogs;
+pub mod color_nodes;
 pub mod dialogs;
 pub mod effect_controls;
 pub mod effects;
@@ -18,6 +20,7 @@ pub mod import_mode;
 pub mod interchange_export;
 pub mod keyboard;
 pub mod lumetri;
+pub mod macro_timeline;
 pub mod masks;
 pub mod media_browser;
 pub mod media_dialogs;
@@ -34,6 +37,7 @@ pub mod panel_state;
 pub mod presets;
 pub mod project;
 pub mod project_dialogs;
+pub mod project_manager;
 pub mod project_views;
 pub mod reference;
 pub mod remix;
@@ -84,7 +88,14 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rect)
         PanelKind::Effects => effects::show(app, ui, rect),
         PanelKind::EffectControls => effect_controls::show(app, ui, rect),
         PanelKind::AudioMeters => meters::show(app, ui, rect),
-        PanelKind::LumetriColor => lumetri::show(app, ui, rect),
+        PanelKind::LumetriColor
+        | PanelKind::ColorPrimaries
+        | PanelKind::ColorWheels
+        | PanelKind::ColorCurves
+        | PanelKind::ColorMasks
+        | PanelKind::ColorQualifier
+        | PanelKind::ColorCreative
+        | PanelKind::ColorVignette => lumetri::show(app, ui, rect, p),
         PanelKind::Properties if graphics::graphic_selected(app) => graphics::properties(app, ui, rect),
         PanelKind::Properties if text::caption_selected(app) => text::caption_properties(app, ui, rect),
         PanelKind::Properties => effect_controls::properties_panel(app, ui, rect),
@@ -105,6 +116,9 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rect)
         PanelKind::EssentialSound => essential_sound::show(app, ui, rect),
         PanelKind::TextToSpeech => tts::show(app, ui, rect),
         PanelKind::ProjectNotes => notes::show(app, ui, rect),
+        PanelKind::MacroTimeline => macro_timeline::show(app, ui, rect),
+        PanelKind::ColorNodes => color_nodes::show(app, ui, rect),
+        PanelKind::ColorClips => color_clips::show(app, ui, rect),
         other => crate::dock::placeholder(ui, rect, &app.tokens, &tlf!("{panel} — coming in a later milestone", panel = crate::i18n::t(other.title()))),
     }
 }

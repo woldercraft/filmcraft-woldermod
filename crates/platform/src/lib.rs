@@ -68,8 +68,6 @@ pub enum Availability {
 /// harmless). Streams they do not take, and every stream while hardware decoding is Off, keep
 /// using FilmCraft's own decoders.
 pub fn register() -> Availability {
-    #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
-    filmcraft_export::register_encoder(nvenc::export::factory);
     #[cfg(target_os = "macos")]
     {
         filmcraft_codecs::register_video_decoder(videotoolbox_factory);
@@ -107,13 +105,18 @@ pub fn register() -> Availability {
         static ONCE: std::sync::Once = std::sync::Once::new();
         let mut available = match vaapi::va::probe() {
             Ok(driver) => {
-                ONCE.call_once(|| log::info!("hardware decoding through VA-API: {driver}"));
+                ONCE.call_once(|| log::info!("hardware decoding & encoding through VA-API: {driver}"));
                 filmcraft_codecs::register_video_decoder(vaapi_factory);
+                filmcraft_export::register_encoder(vaapi::export::factory);
+                filmcraft_export::register_format_probe(filmcraft_export::Format::Hevc, vaapi::export::hevc_available);
+                vaapi::export::warm_probes();
                 filmcraft_codecs::hw::set_hw_backend("VA-API");
                 Availability::Available("VA-API")
             }
             Err(why) => {
                 log::info!("no VA-API hardware decoding: {why}");
+                #[cfg(target_pointer_width = "64")]
+                filmcraft_export::register_encoder(nvenc::export::factory);
                 Availability::Unavailable("no VA-API driver (libva and a DRM render node) and no NVIDIA driver (NVDEC)")
             }
         };
@@ -125,6 +128,7 @@ pub fn register() -> Availability {
                 static NVDEC: std::sync::Once = std::sync::Once::new();
                 NVDEC.call_once(|| log::info!("hardware decoding through NVDEC: {driver}"));
                 filmcraft_codecs::register_video_decoder(nvdec_factory);
+                filmcraft_export::register_encoder(nvenc::export::factory);
                 filmcraft_codecs::hw::set_hw_backend("NVDEC");
                 available = Availability::Available("NVDEC");
             }

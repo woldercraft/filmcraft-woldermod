@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use super::clips::paint_hatch;
 use super::layout::{Layout, max_scroll, new_track_at};
 use super::menus::{CLIP_MENU, EditPointTarget, edit_point_menu, gap_menu, marker_menu, multicam_menu};
@@ -209,6 +211,62 @@ fn scrub_playhead(app: &mut FilmcraftApp, seq: &Sequence, layout: &Layout, p: Po
     app.session.set_playhead(tt);
 }
 
+/// The clips in the sequence between two clips in time and tracks (chain/range selection).
+pub fn clip_range_between(seq: &Sequence, layout: &Layout, a: ClipId, b: ClipId) -> Vec<ClipId> {
+    if a == b {
+        return vec![b];
+    }
+    let Some((track_a, item_a)) = seq.find_item(a) else { return vec![b] };
+    let Some((track_b, item_b)) = seq.find_item(b) else { return vec![b] };
+
+    let t_min = item_a.start.min(item_b.start);
+    let t_max = item_a.end().max(item_b.end());
+
+    let tracks: Vec<TrackId> = if track_a == track_b {
+        vec![track_a]
+    } else {
+        let pos_a = layout.rows.iter().position(|r| r.track == track_a);
+        let pos_b = layout.rows.iter().position(|r| r.track == track_b);
+        match (pos_a, pos_b) {
+            (Some(pa), Some(pb)) => {
+                let min_p = pa.min(pb);
+                let max_p = pa.max(pb);
+                let mut t_set = HashSet::new();
+                layout.rows[min_p..=max_p]
+                    .iter()
+                    .map(|r| r.track)
+                    .filter(|t| t_set.insert(*t))
+                    .collect()
+            }
+            _ => vec![track_a, track_b],
+        }
+    };
+
+    let mut result = Vec::new();
+    let mut seen = HashSet::new();
+    for tid in tracks {
+        if let Some(tr) = seq.track(tid) {
+            for it in &tr.items {
+                if it.start < t_max && it.end() > t_min {
+                    if seen.insert(it.id) {
+                        result.push(it.id);
+                    }
+                }
+            }
+        }
+    }
+    if seen.insert(a) {
+        result.push(a);
+    }
+    if seen.insert(b) {
+        result.push(b);
+    }
+    result.sort_by_key(|&cid| {
+        seq.find_item(cid).map(|(_, it)| it.start).unwrap_or(Tick::ZERO)
+    });
+    result
+}
+
 /// Wheel input over the Timeline, as in Premiere Pro on macOS (checked in 26.5.2): the wheel
 /// moves the tracks under the pointer, Cmd + wheel the Timeline sideways, Option + wheel
 /// zooms about the pointer.
@@ -230,11 +288,22 @@ fn wheel_scroll(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, layout: &
             let v = &mut app.ui.timeline;
             v.target_pps = (v.target_pps * f).clamp(0.05, 24_000.0);
             app.tl.zoom_anchor = Some((anchor_t, p.x));
+        } else if w.shift && (w.delta.y != 0.0 || w.delta.x != 0.0) {
+            // DaVinci Resolve behavior: Shift + Wheel changes video / audio track height
+            let dy = if w.delta.y != 0.0 { w.delta.y } else { w.delta.x };
+            let d = dy * 0.15;
+            if p.y < layout.split_y {
+                let h = &mut app.ui.timeline.video_track_h;
+                *h = (*h + d).clamp(22.0, 220.0);
+            } else {
+                let h = &mut app.ui.timeline.audio_track_h;
+                *h = (*h + d).clamp(22.0, 220.0);
+            }
         } else if w.delta != egui::Vec2::ZERO {
             let wheel_sideways = (app.session.prefs.timeline.mouse_scrolling == "horizontal") != w.command;
             let sideways = if w.delta.x.abs() > w.delta.y.abs() {
                 Some(w.delta.x)
-            } else if wheel_sideways || w.shift {
+            } else if wheel_sideways {
                 Some(w.delta.y)
             } else {
                 None
@@ -451,13 +520,51 @@ fn start_drag(app: &mut FilmcraftApp, ctx: &egui::Context, resp: &egui::Response
         (Tool::Slip, Grab::Other(Hit::Clip { clip, .. })) => Some(Drag::Slip { clip, delta: Tick::ZERO }),
         (Tool::Slide, Grab::Other(Hit::Clip { clip, .. })) => Some(Drag::Slide { clip, delta: Tick::ZERO }),
         (_, Grab::Other(Hit::Clip { clip, track, .. })) => {
-            // select (shift toggles; alt selects one side of a link)
+            // select (Shift / Ctrl+Shift: range/chain selection; Ctrl: toggle; click: select)
             let sel = &app.session.state.selection;
             if mods.shift {
-                let _ = app.session.execute("timeline.select", json!({"clips": [clip.0], "toggle": true, "linked": !mods.alt}));
-            } else if !sel.contains(&clip) || (mods.alt && resp.clicked()) {
+                let anchor = if sel.is_empty() {
+                    clip
+                } else {
+                    app.tl
+                        .selection_anchor
+                        .filter(|&a| seq.find_item(a).is_some() && sel.contains(&a))
+                        .or_else(|| sel.last().copied())
+                        .unwrap_or(clip)
+                };
+                let range_clips = clip_range_between(seq, layout, anchor, clip);
+                let range_ids: Vec<u64> = range_clips.iter().map(|c| c.0).collect();
+                let _ = app.session.execute(
+                    "timeline.select",
+                    json!({
+                        "clips": range_ids,
+                        "add": mods.command,
+                        "linked": !mods.alt,
+                    }),
+                );
+                if app.tl.selection_anchor.is_none() {
+                    app.tl.selection_anchor = Some(anchor);
+                }
+            } else if mods.command {
+                let _ = app.session.execute(
+                    "timeline.select",
+                    json!({
+                        "clips": [clip.0],
+                        "toggle": true,
+                        "linked": !mods.alt,
+                    }),
+                );
+                app.tl.selection_anchor = Some(clip);
+            } else if !sel.contains(&clip) || resp.clicked() {
                 // Alt-click isolates one side; Alt-drag keeps the selected group to copy.
-                let _ = app.session.execute("timeline.select", json!({"clips": [clip.0], "linked": !mods.alt}));
+                let _ = app.session.execute(
+                    "timeline.select",
+                    json!({
+                        "clips": [clip.0],
+                        "linked": !mods.alt,
+                    }),
+                );
+                app.tl.selection_anchor = Some(clip);
             }
             if resp.drag_started() {
                 let clips = app.session.state.selection.clone();
@@ -492,6 +599,7 @@ fn start_drag(app: &mut FilmcraftApp, ctx: &egui::Context, resp: &egui::Response
                 app.session.state.selection.clear();
                 app.session.state.edit_points.clear();
                 app.session.state.transition_selection.clear();
+                app.tl.selection_anchor = None;
                 // empty time between clips: select the gap, for Delete to close it (#648, #668)
                 let gap = match hit {
                     Hit::Empty { track } => app.session.execute("timeline.selectGap", json!({"track": track.0, "time": t.0})).is_ok(),
@@ -1211,4 +1319,46 @@ pub(super) fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence
     drop_targets(app, ui, seq, layout);
 
     app.auto.add("timeline.tracks", layout.content, "tracks");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use filmcraft_engine::Session;
+    use crate::panels::timeline::layout::Row;
+
+    #[test]
+    fn clip_range_between_returns_chain_of_clips() {
+        let mut session = Session::default();
+        session.execute("file.openDemoProject", json!({})).expect("demo project");
+        let app = FilmcraftApp::new(session);
+        let seq = app.session.active_sequence().expect("seq");
+        let track = seq.video_tracks.first().expect("v1");
+        assert!(track.items.len() >= 2, "demo project has multiple items on V1");
+        let c_first = track.items.first().unwrap().id;
+        let c_last = track.items.last().unwrap().id;
+
+        let layout = Layout {
+            content: Rect::from_min_max(pos2(0.0, 0.0), pos2(1000.0, 500.0)),
+            ruler: Rect::from_min_max(pos2(0.0, 0.0), pos2(1000.0, 30.0)),
+            rows: vec![Row {
+                track: track.id,
+                kind: TrackKind::Video,
+                index: 0,
+                rect: Rect::from_min_max(pos2(0.0, 30.0), pos2(1000.0, 80.0)),
+                lane: false,
+            }],
+            pps: 100.0,
+            scroll: 0.0,
+            split_y: 200.0,
+        };
+
+        let range_fwd = clip_range_between(seq, &layout, c_first, c_last);
+        let range_rev = clip_range_between(seq, &layout, c_last, c_first);
+
+        assert_eq!(range_fwd, range_rev, "chain must be identical in forward and reverse");
+        assert_eq!(range_fwd.len(), track.items.len(), "all clips in the chain must be selected");
+        assert_eq!(range_fwd.first().copied(), Some(c_first));
+        assert_eq!(range_fwd.last().copied(), Some(c_last));
+    }
 }

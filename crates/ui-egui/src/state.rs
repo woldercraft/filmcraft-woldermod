@@ -208,6 +208,15 @@ pub struct TimelineView {
     /// (`volume`, `pan`, `mute`, `send.<i>.level`, `fx.<slot>.<param>`).
     #[serde(default)]
     pub track_lanes: std::collections::BTreeMap<u64, String>,
+    /// Lightweight high-performance mode for heavy multi-clip selections and drags.
+    #[serde(default)]
+    pub fast_selection_mode: bool,
+    /// Do not show the prompt dialog suggesting to switch to Fast Selection Mode.
+    #[serde(default)]
+    pub fast_mode_prompt_never_show: bool,
+    /// Dual Timeline / Macro Timeline overview strip integrated into the timeline.
+    #[serde(default)]
+    pub show_macro_timeline: bool,
 }
 
 impl TimelineView {
@@ -238,6 +247,9 @@ impl Default for TimelineView {
             seen_playhead: None,
             fit_empty: None,
             track_lanes: Default::default(),
+            fast_selection_mode: false,
+            fast_mode_prompt_never_show: false,
+            show_macro_timeline: false,
         }
     }
 }
@@ -488,12 +500,45 @@ pub struct UiState {
     /// Essential Sound sub-tab: "Edit" or "Browse".
     #[serde(default)]
     pub essential_sound_tab: String,
+    /// Active Lumetri color node index for node-based grading (0-indexed).
+    #[serde(default)]
+    pub active_color_node: usize,
+    /// User custom labels for color nodes (`clip:node_index` -> label).
+    #[serde(default)]
+    pub color_node_labels: std::collections::HashMap<String, String>,
+    /// Freely movable positions for color nodes in graph (`clip:node_index` -> [x, y] relative to canvas).
+    #[serde(default)]
+    pub color_node_positions: std::collections::HashMap<String, [f32; 2]>,
+    /// Pan offset for ColorNodes graph canvas [x, y].
+    #[serde(default)]
+    pub color_node_pan: [f32; 2],
+    /// Zoom level for ColorNodes graph canvas (1.0 = 100%).
+    #[serde(default = "default_node_zoom")]
+    pub color_node_zoom: f32,
+    /// Active tool in Lumetri Color panel (e.g. "Basic Correction", "Color Wheels & Match", etc.).
+    #[serde(default = "default_lumetri_tool")]
+    pub lumetri_active_tool: String,
+    /// Secondary active tool for dual/split palette view in Lumetri Color panel.
+    #[serde(default = "default_lumetri_secondary_tool")]
+    pub lumetri_secondary_tool: String,
+    /// Dual/split palette view enabled in Lumetri Color panel.
+    #[serde(default)]
+    pub lumetri_dual_view: bool,
+    /// Custom order of Lumetri palette tool buttons.
+    #[serde(default = "default_lumetri_tool_order")]
+    pub lumetri_tool_order: Vec<String>,
+    /// Location of the Lumetri palette tool bar ("top", "bottom", "left").
+    #[serde(default = "default_lumetri_bar_pos")]
+    pub lumetri_bar_pos: String,
     /// Text to Speech panel: the script and voice settings being written or edited.
     #[serde(default)]
     pub tts: crate::panels::tts::TtsDraft,
     /// Export mode: settings, preset, destination, range, the Preset Manager and Quick Export.
     #[serde(default)]
     pub export: crate::panels::export_mode::ExportUi,
+    /// DaVinci Resolve-style Project Manager / Browser.
+    #[serde(default)]
+    pub project_browser: crate::panels::project_manager::ProjectManagerUi,
     /// Text panel: active tab ("Transcript" / "Captions" / "Graphics").
     #[serde(default = "captions_tab")]
     pub text_tab: String,
@@ -522,6 +567,9 @@ pub struct UiState {
     /// Audio Track Mixer ▸ Meter Input(s) Only: record-armed track meters show the recording input.
     #[serde(default)]
     pub mixer_meter_input_only: bool,
+    /// Audio Clip Mixer: whether controls affect the entire track or only the clip at the playhead.
+    #[serde(default)]
+    pub clip_mixer_target_track: bool,
     /// Audio Gain dialog draft (mode, dB values).
     #[serde(default)]
     pub audio_gain: AudioGainDraft,
@@ -962,6 +1010,34 @@ fn captions_tab() -> String {
     "Captions".into()
 }
 
+fn default_node_zoom() -> f32 {
+    1.0
+}
+
+fn default_lumetri_tool() -> String {
+    "Basic Correction".into()
+}
+
+fn default_lumetri_secondary_tool() -> String {
+    "Curves".into()
+}
+
+fn default_lumetri_tool_order() -> Vec<String> {
+    vec![
+        "Basic Correction".into(),
+        "Color Wheels & Match".into(),
+        "Curves".into(),
+        "Power Windows / Máscara".into(),
+        "HSL Secondary".into(),
+        "Creative".into(),
+        "Vignette".into(),
+    ]
+}
+
+fn default_lumetri_bar_pos() -> String {
+    "top".into()
+}
+
 fn yes() -> bool {
     true
 }
@@ -996,8 +1072,19 @@ impl Default for UiState {
             eyedropper: None,
             keyframe_selection: Vec::new(),
             essential_sound_tab: "Edit".into(),
+            active_color_node: 0,
+            color_node_labels: std::collections::HashMap::new(),
+            color_node_positions: std::collections::HashMap::new(),
+            color_node_pan: [0.0, 0.0],
+            color_node_zoom: 1.0,
+            lumetri_active_tool: default_lumetri_tool(),
+            lumetri_secondary_tool: default_lumetri_secondary_tool(),
+            lumetri_dual_view: false,
+            lumetri_tool_order: default_lumetri_tool_order(),
+            lumetri_bar_pos: default_lumetri_bar_pos(),
             tts: Default::default(),
             export: Default::default(),
+            project_browser: Default::default(),
             text_tab: captions_tab(),
             caption_search: String::new(),
             transcript_sel: None,
@@ -1006,6 +1093,7 @@ impl Default for UiState {
             mixer_fx_open: false,
             mixer_hidden: Vec::new(),
             mixer_meter_input_only: false,
+            clip_mixer_target_track: false,
             settings: None,
             audio_gain: AudioGainDraft::default(),
             add_tracks: AddTracksDraft::default(),

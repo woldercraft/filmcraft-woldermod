@@ -50,6 +50,9 @@ pub struct MediaPool {
     /// item → (reference key, source)
     sources: RwLock<HashMap<ItemId, (String, SharedSource)>>,
     proxies: RwLock<HashMap<ItemId, (String, SharedSource)>>,
+    /// Per-item lock held while opening a source or proxy so concurrent render threads do not open
+    /// duplicate container readers and hardware decoder sessions for the same item on first access.
+    opening: Mutex<HashMap<ItemId, Arc<Mutex<()>>>>,
     offline: Arc<RwLock<HashMap<ItemId, OfflineStatus>>>,
     use_proxies: AtomicBool,
     /// Per item: video frames that failed in a row in the monitors (see [`Self::monitor_source`]).
@@ -67,6 +70,7 @@ impl Default for MediaPool {
         Self {
             sources: RwLock::new(HashMap::new()),
             proxies: RwLock::new(HashMap::new()),
+            opening: Mutex::new(HashMap::new()),
             offline: Arc::new(RwLock::new(HashMap::new())),
             use_proxies: AtomicBool::new(false),
             failures: Arc::default(),
@@ -308,6 +312,15 @@ impl MediaPool {
         self.resolve(p, item, services, false)
     }
 
+    fn item_open_lock(&self, item: ItemId) -> Arc<Mutex<()>> {
+        self.opening
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(item)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
     fn resolve(&self, p: &Project, item: ItemId, services: &dyn Services, proxies: bool) -> Option<SharedSource> {
         let (item, m, _) = p.resolve_media(item)?;
         let it = p.item(item)?;
@@ -320,6 +333,13 @@ impl MediaPool {
         }
         let key = media_key(m);
         if let Some((k, s)) = self.sources.read().unwrap_or_else(PoisonError::into_inner).get(&item)
+            && (k.is_empty() || *k == key)
+        {
+            return Some(s.clone());
+        }
+        let item_lock = self.item_open_lock(item);
+        let _guard = item_lock.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((k, s)) = self.sources.read().unwrap_or_else(|e| e.into_inner()).get(&item)
             && (k.is_empty() || *k == key)
         {
             return Some(s.clone());
@@ -368,6 +388,13 @@ impl MediaPool {
     fn proxy_source(&self, item: ItemId, path: &str, m: &MediaClip, services: &dyn Services) -> Option<SharedSource> {
         let key = format!("proxy:{path}");
         if let Some((k, s)) = self.proxies.read().unwrap_or_else(PoisonError::into_inner).get(&item)
+            && *k == key
+        {
+            return Some(s.clone());
+        }
+        let item_lock = self.item_open_lock(item);
+        let _guard = item_lock.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((k, s)) = self.proxies.read().unwrap_or_else(|e| e.into_inner()).get(&item)
             && *k == key
         {
             return Some(s.clone());

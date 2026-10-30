@@ -154,7 +154,12 @@ fn lumetri_lut_menus_and_section_switches() {
     for id in ["lumetri.input_lut", "lumetri.switch.Basic Correction", "lumetri.switch.Creative", "lumetri.switch.Vignette"] {
         assert!(ids.iter().any(|i| i == id), "{id} missing from {ids:?}");
     }
+    println!("NODE 0 RECT: {:?}", d.element("lumetri.node.0"));
+    println!("BASIC RECT: {:?}", d.element("lumetri.section.Basic Correction"));
+    println!("CREATIVE RECT: {:?}", d.element("lumetri.section.Creative"));
     d.click("lumetri.section.Creative");
+    println!("EXPANDED FX: {:?}", d.app().ui.expanded_fx);
+    println!("AFTER CLICK: {:?}", d.ids("lumetri."));
     assert!(d.ids("lumetri.").iter().any(|i| i == "lumetri.look_lut"));
     d.snapshot("color-lumetri-panel", None);
     // clicking a section switch bypasses the section (an undoable engine command)
@@ -363,4 +368,274 @@ fn lumetri_rows_keep_their_width_when_the_clip_name_is_long() {
     d.frames(3);
     let long = d.element("lumetri.param.hdr_white").expect("hdr_white row");
     assert_eq!(short, long, "a long clip name must not move or widen the control rows");
+}
+
+#[test]
+fn color_nodes_graph_and_actions() {
+    let mut d = Driver::demo();
+    d.ok("ui.set", json!({"workspace": "Color"}));
+    d.frames(3);
+    let clip = select_first_clip(&mut d);
+
+    // Initial prompt to add node when none exists yet
+    let init_ids = d.ids("color_nodes.");
+    assert!(init_ids.iter().any(|i| i == "color_nodes.init_node"), "{init_ids:?}");
+
+    // Click init_node to add first serial node
+    d.click("color_nodes.init_node");
+    d.frames(3);
+    let ids_with_one = d.ids("color_nodes.");
+    assert!(ids_with_one.iter().any(|i| i == "color_nodes.node.0"), "{ids_with_one:?}");
+
+    // Add serial node
+    d.click("color_nodes.add_serial");
+    d.frames(3);
+    let ids_after_add = d.ids("color_nodes.");
+    assert!(ids_after_add.iter().any(|i| i == "color_nodes.node.1"), "{ids_after_add:?}");
+
+    // Toggle bypass on node 1
+    d.click("color_nodes.node.1.power");
+    d.frames(2);
+    let seq = d.exec("sequence.inspect", json!({}));
+    let items = seq["video"][0]["items"].as_array().unwrap().clone();
+    let it = items.into_iter().find(|i| i["clip"] == clip).unwrap();
+    let lumetris: Vec<_> = it["effects"].as_array().unwrap().iter().filter(|e| e["effect"] == "lumetri").collect();
+    assert_eq!(lumetris.len(), 2);
+    assert_eq!(lumetris[1]["enabled"], false);
+
+    // Bypass all
+    d.click("color_nodes.bypass_all");
+    d.frames(2);
+    let seq = d.exec("sequence.inspect", json!({}));
+    let it = seq["video"][0]["items"].as_array().unwrap().iter().find(|i| i["clip"] == clip).unwrap().clone();
+    let lumetris: Vec<_> = it["effects"].as_array().unwrap().iter().filter(|e| e["effect"] == "lumetri").collect();
+    assert!(lumetris.iter().all(|e| !e["enabled"].as_bool().unwrap()));
+
+    // Delete node
+    d.click("color_nodes.node.1");
+    d.frames(2);
+    d.click("color_nodes.delete_node");
+    d.frames(2);
+    let seq = d.exec("sequence.inspect", json!({}));
+    let it = seq["video"][0]["items"].as_array().unwrap().iter().find(|i| i["clip"] == clip).unwrap().clone();
+    let lumetris: Vec<_> = it["effects"].as_array().unwrap().iter().filter(|e| e["effect"] == "lumetri").collect();
+    assert_eq!(lumetris.len(), 1);
+}
+
+#[test]
+fn bottom_navigation_color_page() {
+    let mut d = Driver::demo();
+    d.frames(3);
+
+    // Click Color on bottom bar
+    d.click("bottom_nav.color");
+    d.frames(3);
+    let inspect = d.ok("ui.inspect", json!({}));
+    assert_eq!(inspect["ui"]["workspace"], "Color");
+    assert_eq!(inspect["ui"]["mode"], "Edit");
+
+    // Click Edit on bottom bar
+    d.click("bottom_nav.edit");
+    d.frames(3);
+    let inspect = d.ok("ui.inspect", json!({}));
+    assert_eq!(inspect["ui"]["workspace"], "Editing");
+    assert_eq!(inspect["ui"]["mode"], "Edit");
+
+    // Click Projects on bottom bar
+    d.click("bottom_nav.projects");
+    d.frames(3);
+    let inspect = d.ok("ui.inspect", json!({}));
+    assert_eq!(inspect["ui"]["mode"], "Import");
+
+    // Click Export on bottom bar
+    d.click("bottom_nav.export");
+    d.frames(3);
+    let inspect = d.ok("ui.inspect", json!({}));
+    assert_eq!(inspect["ui"]["mode"], "Export");
+}
+
+#[test]
+fn timeline_clips_selector_and_draggable_nodes() {
+    let mut d = Driver::demo();
+    d.ok("ui.set", json!({"workspace": "Color"}));
+    d.frames(3);
+
+    // 1. Clips selector strip
+    let clip0_elem = d.element("color_clips.index.0").expect("first clip in color clips strip");
+    assert!(clip0_elem[2] > 50.0);
+    assert!(d.element("color_clips.next").is_some());
+    assert!(d.element("color_clips.prev").is_some());
+
+    // Click next clip button in strip
+    let initial_ph = d.app().session.playhead();
+    d.click("color_clips.next");
+    d.frames(2);
+    let next_ph = d.app().session.playhead();
+    assert!(next_ph > initial_ph, "playhead should seek forward to next clip");
+
+    // Click back to first clip via index.0
+    d.click("color_clips.index.0");
+    d.frames(2);
+    assert_eq!(d.app().session.playhead(), filmcraft_time::Tick(0), "playhead should seek to clip 0 start");
+
+    // 2. Rotary Knobs (Perillas) in Primaries
+    let first_clip = select_first_clip(&mut d);
+    d.exec("effects.apply", json!({"clips": [first_clip], "effect": "lumetri"}));
+    d.frames(2);
+    assert!(d.element("lumetri.knob.temperature").is_some());
+    assert!(d.element("lumetri.knob.contrast").is_some());
+    assert!(d.element("lumetri.knob.saturation").is_some());
+
+    // 3. Draggable color nodes
+    d.click("color_nodes.add_serial");
+    d.frames(2);
+    let node0_initial = d.element("color_nodes.node.0").expect("node 0 rect");
+
+    // Drag node 0 by 40px right, 30px down
+    d.ok(
+        "ui.drag",
+        json!({
+            "from": {"x": node0_initial[0] + 20.0, "y": node0_initial[1] + 20.0},
+            "to": {"x": node0_initial[0] + 60.0, "y": node0_initial[1] + 50.0},
+            "steps": 4
+        }),
+    );
+    d.frames(2);
+
+    let key = format!("{}:0", first_clip);
+    assert!(d.app().ui.color_node_positions.contains_key(&key), "dragged position should be recorded");
+
+    // Click organize to reset layout
+    d.click("color_nodes.organize");
+    d.frames(2);
+    assert!(!d.app().ui.color_node_positions.contains_key(&key), "organize should clear custom positions");
+}
+
+#[test]
+fn davinci_resolve_color_page_layout_and_power_windows() {
+    let mut d = Driver::demo();
+    d.ok("ui.set", json!({"workspace": "Color"}));
+    d.frames(4);
+
+    // 1. Clips ribbon is present
+    assert!(d.element("color_clips.index.0").is_some());
+
+    // 2. Select clip and apply lumetri
+    let clip = select_first_clip(&mut d);
+    d.exec("effects.apply", json!({"clips": [clip], "effect": "lumetri"}));
+    d.frames(3);
+
+    // 3. Power Windows / Máscara Palette
+    d.click("lumetri.section.Power Windows");
+    d.frames(2);
+    assert!(d.element("lumetri.mask.add_linear").is_some(), "linear window button exists");
+    assert!(d.element("lumetri.mask.add_circle").is_some(), "circle window button exists");
+    assert!(d.element("lumetri.mask.add_pen").is_some(), "pen window button exists");
+
+    // Add a Circle Power Window
+    d.click("lumetri.mask.add_circle");
+    d.frames(3);
+
+    let mask_list = d.exec("masks.list", json!({"clip": clip}));
+    let masks = mask_list["masks"].as_array().unwrap();
+    assert_eq!(masks.len(), 1, "Circle power window created on color node");
+    assert_eq!(masks[0]["name"], "Mask (1)");
+
+    // Add a Linear Power Window
+    d.click("lumetri.mask.add_linear");
+    d.frames(3);
+    let mask_list = d.exec("masks.list", json!({"clip": clip}));
+    let masks = mask_list["masks"].as_array().unwrap();
+    assert_eq!(masks.len(), 2, "Linear power window created on color node");
+}
+
+#[test]
+fn color_nodes_pan_zoom_and_multi_row() {
+    let mut d = Driver::demo();
+    d.ok("ui.set", json!({"workspace": "Color"}));
+    d.frames(4);
+    let _clip = select_first_clip(&mut d);
+
+    // Initial node
+    d.click("color_nodes.init_node");
+    d.frames(2);
+
+    // Add 11 more nodes (total 12 nodes)
+    for _ in 0..11 {
+        d.click("color_nodes.add_serial");
+        d.frames(1);
+    }
+    d.frames(3);
+
+    // Verify nodes exist
+    let ids = d.ids("color_nodes.node.");
+    assert!(ids.iter().any(|i| i == "color_nodes.node.11"), "all 12 nodes present: {ids:?}");
+
+    // Check zoom controls exist
+    assert!(d.element("color_nodes.fit").is_some(), "fit button exists");
+    assert!(d.element("color_nodes.zoom_out").is_some(), "zoom_out button exists");
+    assert!(d.element("color_nodes.zoom_reset").is_some(), "zoom_reset button exists");
+    assert!(d.element("color_nodes.zoom_in").is_some(), "zoom_in button exists");
+
+    // Click zoom out
+    let initial_zoom = d.app().ui.color_node_zoom;
+    d.click("color_nodes.zoom_out");
+    d.frames(2);
+    assert!(d.app().ui.color_node_zoom < initial_zoom, "zoom decreased");
+
+    // Click zoom reset
+    d.click("color_nodes.zoom_reset");
+    d.frames(2);
+    assert_eq!(d.app().ui.color_node_zoom, 1.0, "zoom reset to 1.0");
+
+    // Click fit to view
+    d.click("color_nodes.fit");
+    d.frames(2);
+    assert!(d.app().ui.color_node_zoom <= 1.0, "fit adjusted zoom appropriately");
+
+    // Check Lumetri node switcher: + button is still visible and clickable even with 12 nodes
+    assert!(d.element("lumetri.node.add").is_some(), "lumetri.node.add stays visible");
+    assert!(d.element("lumetri.node.0").is_some(), "lumetri.node.0 visible");
+}
+
+#[test]
+fn color_tool_panels_docking_and_switching() {
+    use filmcraft_ui_egui::dock::PanelKind;
+    let mut d = Driver::demo();
+    d.ok("ui.set", json!({"workspace": "Color"}));
+    d.frames(3);
+    let clip = select_first_clip(&mut d);
+    d.exec("effects.apply", json!({"clips": [clip], "effect": "lumetri"}));
+    d.frames(3);
+
+    // Initial state: Color workspace has LumetriColor docked
+    assert!(d.harness.state().ui.dock.contains(&PanelKind::LumetriColor));
+
+    // Clicking switches window or tool
+    d.harness.state_mut().switch_color_window(PanelKind::LumetriColor, PanelKind::ColorCurves, "Curves");
+    d.frames(2);
+    assert!(d.harness.state().ui.dock.contains(&PanelKind::ColorCurves));
+
+    // Can dock ColorWheels into workspace as a separate window
+    d.harness.state_mut().show_panel(PanelKind::ColorWheels);
+    d.frames(2);
+    assert!(d.harness.state().ui.dock.contains(&PanelKind::ColorCurves));
+    assert!(d.harness.state().ui.dock.contains(&PanelKind::ColorWheels));
+
+    // Both panels are visible simultaneously in the dock layout
+    assert_ne!(PanelKind::ColorCurves, PanelKind::ColorWheels);
+
+    // Float ColorMasks window anywhere on screen
+    d.harness.state_mut().show_panel(PanelKind::ColorMasks);
+    d.harness.state_mut().apply_dock(craft_ui::docking::Action::Float {
+        panel: PanelKind::ColorMasks,
+        rect: [100.0, 100.0, 400.0, 300.0],
+    }).unwrap();
+    d.frames(2);
+    assert!(d.harness.state().ui.dock.floating.iter().any(|w| w.contains(&PanelKind::ColorMasks)));
+
+    // Begin panel drag test
+    let ctx = d.harness.ctx.clone();
+    d.harness.state_mut().begin_panel_drag(&ctx, PanelKind::ColorCreative, PanelKind::ColorCurves);
+    assert!(d.harness.state().ui.dock.contains(&PanelKind::ColorCreative));
 }

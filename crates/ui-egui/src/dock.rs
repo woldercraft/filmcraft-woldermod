@@ -41,10 +41,20 @@ pub enum PanelKind {
     ReferenceMonitor,
     Timecode,
     ProjectNotes,
+    MacroTimeline,
+    ColorNodes,
+    ColorClips,
+    ColorPrimaries,
+    ColorWheels,
+    ColorCurves,
+    ColorMasks,
+    ColorQualifier,
+    ColorCreative,
+    ColorVignette,
 }
 
 impl PanelKind {
-    pub const ALL: [PanelKind; 28] = [
+    pub const ALL: [PanelKind; 38] = [
         PanelKind::Project,
         PanelKind::MediaBrowser,
         PanelKind::Libraries,
@@ -73,6 +83,16 @@ impl PanelKind {
         PanelKind::ReferenceMonitor,
         PanelKind::Timecode,
         PanelKind::ProjectNotes,
+        PanelKind::MacroTimeline,
+        PanelKind::ColorNodes,
+        PanelKind::ColorClips,
+        PanelKind::ColorPrimaries,
+        PanelKind::ColorWheels,
+        PanelKind::ColorCurves,
+        PanelKind::ColorMasks,
+        PanelKind::ColorQualifier,
+        PanelKind::ColorCreative,
+        PanelKind::ColorVignette,
     ];
     pub fn title(self) -> &'static str {
         match self {
@@ -104,6 +124,16 @@ impl PanelKind {
             PanelKind::ReferenceMonitor => "Reference Monitor",
             PanelKind::Timecode => "Timecode",
             PanelKind::ProjectNotes => "Project Notes",
+            PanelKind::MacroTimeline => "Macro Timeline",
+            PanelKind::ColorNodes => "Color Nodes",
+            PanelKind::ColorClips => "Clips",
+            PanelKind::ColorPrimaries => "Primaries",
+            PanelKind::ColorWheels => "Color Wheels & Match",
+            PanelKind::ColorCurves => "Curves",
+            PanelKind::ColorMasks => "Power Windows",
+            PanelKind::ColorQualifier => "Qualifier",
+            PanelKind::ColorCreative => "Creative & LUTs",
+            PanelKind::ColorVignette => "Vignette",
         }
     }
     pub fn id(self) -> String {
@@ -441,15 +471,31 @@ fn workspace_root(name: &str) -> Node<PanelKind> {
             ),
             bottom_editing(),
         ),
-        "Color" => hsplit(
-            Ratio(0.79),
+        "Color" => {
+            let top_row = hsplit(
+                SplitSize::FixedFirst(270.0),
+                tabs(&[Project, MediaBrowser, Effects], 0),
+                hsplit(
+                    Ratio(0.55),
+                    tabs(&[Program], 0),
+                    tabs(&[ColorNodes], 0),
+                ),
+            );
+            let bottom_row = hsplit(
+                Ratio(0.72),
+                tabs(&[LumetriColor], 0),
+                tabs(&[LumetriScopes], 0),
+            );
             vsplit(
-                Ratio(0.58),
-                hsplit(Ratio(0.42), tabs(&[LumetriScopes, Source, EffectControls], 0), tabs(&[Program], 0)),
-                hsplit(Ratio(0.3), tabs(&[Project, Info, Markers, History], 0), bottom_editing()),
-            ),
-            tabs(&[LumetriColor, Effects], 0),
-        ),
+                Ratio(0.40),
+                top_row,
+                vsplit(
+                    SplitSize::FixedFirst(92.0),
+                    tabs(&[ColorClips, Timeline], 0),
+                    bottom_row,
+                ),
+            )
+        },
         "Effects" => hsplit(
             Ratio(0.8),
             vsplit(
@@ -513,6 +559,10 @@ pub trait LayoutExt {
     fn restore_timeline(&mut self);
     /// Add a panel as a tab next to `near` (else Project, Program or the first docked panel).
     fn open_near(&mut self, panel: PanelKind, near: PanelKind);
+    /// Replace one panel with another in-place within its tab group.
+    fn replace_panel(&mut self, from: PanelKind, to: PanelKind) -> bool;
+    /// Swap the positions of two panels anywhere in the tree.
+    fn swap_panels(&mut self, p1: PanelKind, p2: PanelKind) -> bool;
 }
 
 impl LayoutExt for Layout {
@@ -571,6 +621,70 @@ impl LayoutExt for Layout {
             .find(|candidate| docked.contains(candidate))
             .or_else(|| docked.panels().first().map(|first| **first));
         let _ = self.apply(Action::Open { panel, anchor });
+    }
+
+    fn replace_panel(&mut self, from: PanelKind, to: PanelKind) -> bool {
+        fn replace_in(node: &mut Node<PanelKind>, from: PanelKind, to: PanelKind) -> bool {
+            match node {
+                Node::Split { first, second, .. } => replace_in(first, from, to) || replace_in(second, from, to),
+                Node::Tabs { panels, .. } => {
+                    if let Some(pos) = panels.iter().position(|p| *p == from) {
+                        panels[pos] = to;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            }
+        }
+        if let Some(root) = self.root.as_mut() && replace_in(root, from, to) {
+            return true;
+        }
+        for window in &mut self.floating {
+            if replace_in(&mut window.root, from, to) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn swap_panels(&mut self, p1: PanelKind, p2: PanelKind) -> bool {
+        fn swap_in(node: &mut Node<PanelKind>, a: PanelKind, b: PanelKind) {
+            match node {
+                Node::Split { first, second, .. } => {
+                    swap_in(first, a, b);
+                    swap_in(second, a, b);
+                }
+                Node::Tabs { panels, .. } => {
+                    for p in panels.iter_mut() {
+                        if *p == a {
+                            *p = b;
+                        } else if *p == b {
+                            *p = a;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let e1 = self.contains(&p1);
+        let e2 = self.contains(&p2);
+        if e1 && e2 {
+            if let Some(root) = self.root.as_mut() {
+                swap_in(root, p1, p2);
+            }
+            for window in &mut self.floating {
+                swap_in(&mut window.root, p1, p2);
+            }
+            true
+        } else if e1 {
+            self.replace_panel(p1, p2)
+        } else if e2 {
+            self.replace_panel(p2, p1)
+        } else {
+            false
+        }
     }
 }
 
@@ -822,14 +936,18 @@ mod tests {
         }
     }
 
-    /// In every built-in workspace Tools and the Audio Meters keep their widths as the window
-    /// resizes; every other group resizes with it.
+    /// In built-in workspaces Tools and the Audio Meters keep their widths as the window
+    /// resizes; the DaVinci Resolve-style Color workspace fixes its side column and clips strip.
     #[test]
     fn workspaces_fix_only_tools_and_meters() {
         for w in WORKSPACES {
             let layout = workspace(w);
             let fixed = layout.root.as_ref().map(fixed_splits).unwrap_or_default();
-            assert_eq!(fixed, vec![SplitSize::FixedFirst(TOOLS_WIDTH), SplitSize::FixedSecond(METERS_WIDTH)], "{w}");
+            if w == "Color" {
+                assert_eq!(fixed, vec![SplitSize::FixedFirst(270.0), SplitSize::FixedFirst(92.0)], "{w}");
+            } else {
+                assert_eq!(fixed, vec![SplitSize::FixedFirst(TOOLS_WIDTH), SplitSize::FixedSecond(METERS_WIDTH)], "{w}");
+            }
         }
     }
 

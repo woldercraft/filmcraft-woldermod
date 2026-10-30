@@ -1,7 +1,7 @@
 use super::output::OutputSink;
 use super::run::validate_range;
 use super::{
-    Arc, AudioCodec, AudioSettings, BitrateMode, Deserialize, ExportEffects, ExportError, ExportMetadata, ExrCompression, FieldOrder, FrameRate, GpuRendering,
+    Arc, AudioCodec, AudioSettings, BitrateMode, ColorConversion, Deserialize, ExportEffects, ExportError, ExportMetadata, ExrCompression, FieldOrder, FrameRate, GpuRendering,
     H264Profile, HardwareEncoding, Multiplexer, MxfVideoCodec, Result, SampleEntry, Scaling, Serialize, Tick, TimeRange,
 };
 
@@ -330,6 +330,10 @@ pub struct ExportSettings {
     /// GPU rendering: Auto / Off, Off by default). Off = the CPU reference renderer exactly.
     #[serde(default)]
     pub gpu_rendering: GpuRendering,
+    /// Where RGB is converted to the encoder's YUV layout (Export ▸ Color conversion: Auto / CPU).
+    /// Auto converts on the GPU when the encoder can take NV12 (the fastest route).
+    #[serde(default)]
+    pub color_conversion: ColorConversion,
     /// VBR maximum bitrate (None = 1.5 × target).
     pub max_bitrate_kbps: Option<u32>,
     /// Adaptive bitrate (the Match Source presets): bits per pixel per frame; replaces
@@ -445,6 +449,7 @@ impl Default for ExportSettings {
             crf: DEFAULT_CRF,
             hardware_encoding: HardwareEncoding::default(),
             gpu_rendering: GpuRendering::Off,
+            color_conversion: ColorConversion::Auto,
             max_bitrate_kbps: None,
             adaptive_bitrate: None,
             keyframe_distance: None,

@@ -1,5 +1,5 @@
 use super::{
-    AudioCodec, BitrateMode, ExportSettings, ExrCompression, FieldOrder, FileDialog, FilmcraftApp, Format, FrameRate, GpuRendering, H264Profile,
+    AudioCodec, BitrateMode, ColorConversion, ExportSettings, ExrCompression, FieldOrder, FileDialog, FilmcraftApp, Format, FrameRate, GpuRendering, H264Profile,
     HardwareEncoding, Multiplexer, MxfVideoCodec, Placement, PresetManager, Rect, Reg, SampleFormat, Sense, TextOverlay, Tokens, apply_preset, pos2, vec2,
 };
 
@@ -224,6 +224,7 @@ pub(super) fn settings_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: R
     let has_captions = app.session.active_sequence().is_some_and(|q| !q.caption_tracks.is_empty());
     // an HDR sequence exports HDR (H.265 Main 10 where the hardware encoder has it) unless SDR is asked for
     let seq_hdr = app.session.active_sequence().is_some_and(|q| q.settings.color.working.is_hdr());
+    let gpu_name = app.gpu.as_ref().map(|g| g.render_state.adapter.get_info().name.clone());
     let all_presets = app.session.export_presets.all();
     let favs: Vec<String> = all_presets.iter().filter(|p| app.session.export_presets.is_favorite(&p.name)).map(|p| p.name.clone()).collect();
     let mut pick_folder = false;
@@ -314,7 +315,7 @@ pub(super) fn settings_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: R
         ui.add_space(8.0);
         let s = &mut ex.settings;
         if s.has_video() && section(ui, &mut reg, &mut ex.open_sections, "video", tl!("Video"), &t) {
-            video_section(ui, &mut reg, s, &t, seq_w, seq_h, seq_hdr);
+            video_section(ui, &mut reg, s, &t, seq_w, seq_h, seq_hdr, gpu_name.as_deref());
         }
         if (s.has_audio()
             || !s.has_video()
@@ -406,7 +407,7 @@ pub(super) fn settings_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: R
     reg.flush(app);
 }
 
-fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &Tokens, seq_w: u32, seq_h: u32, seq_hdr: bool) {
+fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &Tokens, seq_w: u32, seq_h: u32, seq_hdr: bool, gpu_name: Option<&str>) {
     // frame size
     let mut match_size = s.frame_size.is_none();
     row(ui, t, tl!("Frame Size"), |ui| {
@@ -464,6 +465,8 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
             check(ui, reg, "export.video.alpha", &mut s.alpha, tl!("Include Alpha Channel"));
         });
     }
+    let gpu_short = gpu_name.map(|n| n.split(" (").next().unwrap_or(n).trim()).filter(|n| !n.is_empty());
+    let hw_enc_available = filmcraft_engine::export::available(Format::Hevc);
     match s.video_format() {
         f @ (Format::H264 | Format::Hevc | Format::Av1) => {
             // H.265 and AV1: hardware encoders only (one profile, level chosen by the encoder)
@@ -480,7 +483,10 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
                         (false, _) => tl!("Main (8-bit)"),
                     };
                     row(ui, t, tl!("Profile"), |ui| ui.label(label));
-                    row(ui, t, tl!("Encoder"), |ui| ui.label(tl!("Hardware (H.265 has no software encoder)")));
+                    let hw_label = gpu_short
+                        .map(|g| format!("{g} (Hardware GPU)"))
+                        .unwrap_or_else(|| tl!("Hardware (H.265 has no software encoder)").to_string());
+                    row(ui, t, tl!("Encoder"), |ui| ui.label(hw_label));
                 }
             } else {
                 row(ui, t, tl!("Profile"), |ui| {
@@ -557,11 +563,33 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
             // every machine without one keeps the built-in encoder.
             // H.265 and AV1 have only hardware encoders: choosing the format is the opt-in.
             if !hevc {
-                row(ui, t, "Hardware Encoding", |ui| {
-                    let mut on = s.hardware_encoding == HardwareEncoding::Auto;
-                    if check(ui, reg, "export.video.hardwareEncoding", &mut on, "Use the hardware encoder when available") {
-                        s.hardware_encoding = if on { HardwareEncoding::Auto } else { HardwareEncoding::Off };
+                row(ui, t, tl!("Encoder"), |ui| {
+                    let hw_opt = gpu_short
+                        .map(|g| format!("{g} (Hardware GPU)"))
+                        .unwrap_or_else(|| tl!("Auto (Hardware when available)").to_string());
+                    let encoder_opts = [
+                        (hw_opt, true),
+                        (tl!("Native / CPU (Software x264)").to_string(), true),
+                    ];
+                    let cur = if s.hardware_encoding == HardwareEncoding::Auto {
+                        &encoder_opts[0].0
+                    } else {
+                        &encoder_opts[1].0
+                    };
+                    if let Some(i) = combo(ui, reg, "export.video.encoder", cur, &encoder_opts, 230.0) {
+                        s.hardware_encoding = if i == 0 { HardwareEncoding::Auto } else { HardwareEncoding::Off };
                     }
+                    reg.add("export.video.hardwareEncoding", ui.min_rect(), "Hardware encoding");
+                });
+                row(ui, t, "", |ui| {
+                    let g_label = gpu_short.unwrap_or("GPU");
+                    let (status_text, is_hw) = if s.hardware_encoding == HardwareEncoding::Auto && hw_enc_available {
+                        (format!("🟢 Exportación 100% con GPU: {g_label} (Render Vulkan + Codificador Hardware)"), true)
+                    } else {
+                        (format!("ℹ Codificador en CPU (Software x264) · Efectos en {g_label}"), false)
+                    };
+                    let color = if is_hw { t.accent } else { t.text_dim };
+                    ui.label(egui::RichText::new(status_text).size(11.0).color(color));
                 });
             }
         }
@@ -622,12 +650,34 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
     }
     // Composite the picture on the GPU (filmcraft-gpu) instead of the CPU reference renderer;
     // Auto falls back to the CPU wherever the GPU cannot render the frame.
-    row(ui, t, tl!("GPU Rendering"), |ui| {
+    row(ui, t, tl!("GPU Acceleration"), |ui| {
         let mut on = s.gpu_rendering == GpuRendering::Auto;
         if check(ui, reg, "export.gpuRendering", &mut on, tl!("Composite on the GPU when available")) {
             s.gpu_rendering = if on { GpuRendering::Auto } else { GpuRendering::Off };
         }
     });
+    row(ui, t, "", |ui| {
+        let g_label = gpu_short.unwrap_or("GPU");
+        let (msg, col) = if s.gpu_rendering == GpuRendering::Auto {
+            (format!("⚡ Renderizado activo en {g_label} (Vulkan: efectos, capas y color)"), t.accent)
+        } else {
+            ("Renderizado en CPU (desactivado)".to_string(), t.text_dim)
+        };
+        ui.label(egui::RichText::new(msg).size(11.0).color(col));
+    });
+    if matches!(s.video_format(), Format::H264 | Format::Hevc) {
+        row(ui, t, tl!("Color Conversion"), |ui| {
+            let options = [
+                ("Auto (Direct GPU NV12 compute)", ColorConversion::Auto),
+                ("CPU (Software conversion)", ColorConversion::Cpu),
+            ];
+            let cur = if s.color_conversion == ColorConversion::Auto { options[0].0 } else { options[1].0 };
+            let labels: Vec<(String, bool)> = options.iter().map(|(l, _)| (l.to_string(), true)).collect();
+            if let Some(i) = combo(ui, reg, "export.video.colorConversion", cur, &labels, 240.0) {
+                s.color_conversion = options[i].1;
+            }
+        });
+    }
     row(ui, t, "", |ui| check(ui, reg, "export.video.maxDepth", &mut s.render_at_max_depth, tl!("Render at Maximum Depth")));
     row(ui, t, "", |ui| check(ui, reg, "export.video.maxQuality", &mut s.max_render_quality, tl!("Use Maximum Render Quality")));
 }

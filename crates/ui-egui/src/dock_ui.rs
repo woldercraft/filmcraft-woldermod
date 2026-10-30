@@ -22,6 +22,10 @@ pub fn area_id() -> egui::Id {
     egui::Id::unique("filmcraft-docking")
 }
 
+pub(crate) fn drag_id() -> egui::Id {
+    egui::Id::unique("dock-panel-drag")
+}
+
 /// Where each panel body was drawn last frame, and on which layer.
 fn bodies_id() -> egui::Id {
     area_id().with("bodies")
@@ -147,6 +151,41 @@ impl FilmcraftApp {
 
     pub fn apply_dock(&mut self, action: Action<PanelKind>) -> Result<(), String> {
         self.apply_dock_all(vec![action])
+    }
+
+    /// Begin dragging a panel into the dock system across the screen.
+    pub fn begin_panel_drag(&mut self, ctx: &egui::Context, panel: PanelKind, near: PanelKind) {
+        if !self.ui.dock.contains(&panel) && !self.ui.dock.floating.iter().any(|g| g.contains(&panel)) {
+            self.ui.dock.open_near(panel, near);
+        }
+        ctx.data_mut(|data| data.insert_temp(drag_id(), panel));
+        self.ui.focused = panel;
+        ctx.request_repaint();
+    }
+
+    /// Switch the active tool or replace the color panel in place.
+    pub fn switch_color_window(&mut self, current: PanelKind, target: PanelKind, target_tool_id: &str) {
+        self.ui.lumetri_active_tool = target_tool_id.to_string();
+        if current == target {
+            return;
+        }
+        if current == PanelKind::LumetriColor {
+            if !self.ui.dock.contains(&target) && !self.ui.dock.floating.iter().any(|g| g.contains(&target)) {
+                self.ui.dock.replace_panel(current, target);
+                self.ui.focused = target;
+            } else {
+                self.ui.focused = target;
+                let _ = self.apply_dock(craft_ui::docking::Action::Activate { panel: target });
+            }
+            return;
+        }
+        if self.ui.dock.contains(&target) || self.ui.dock.floating.iter().any(|g| g.contains(&target)) {
+            self.ui.focused = target;
+            let _ = self.apply_dock(craft_ui::docking::Action::Activate { panel: target });
+        } else {
+            self.ui.dock.replace_panel(current, target);
+            self.ui.focused = target;
+        }
     }
 
     fn apply_dock_all(&mut self, actions: Vec<Action<PanelKind>>) -> Result<(), String> {

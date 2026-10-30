@@ -3628,3 +3628,50 @@
 	No matching text.	Ningún texto coincide.
 	H.265 (HEVC) needs a hardware encoder (NVENC on NVIDIA GPUs, VideoToolbox on macOS); none was found on this machine, and FilmCraft has no software H.265 encoder yet. Choose H.264 or ProRes instead.	H.265 (HEVC) necesita un codificador por hardware (NVENC en GPU NVIDIA, VideoToolbox en macOS); no se encontró ninguno en este equipo y FilmCraft aún no tiene un codificador H.265 por software. Elija H.264 o ProRes.
 	AV1 needs a hardware encoder; none was found on this machine, and FilmCraft has no software AV1 encoder yet.	AV1 necesita un codificador por hardware; no se encontró ninguno en este equipo y FilmCraft aún no tiene un codificador AV1 por software.
+	Apply Changes & Exit (Enter)	Aplicar cambios y salir (Enter)
+	Creative & LUTs	Creative & LUTs
+	Power Windows	Máscara
+	Power Windows / Máscara	Máscara
+	Primaries	Primarias
+	Qualifier	Cualificador
+	Remove Silence…	Eliminar silencio…
+	Remove Silence	Eliminar silencio
+	Threshold:	Umbral:
+	Pre head:	Margen inicial:
+	Post tail:	Margen final:
+	Minimum to strip:	Silencio mínimo a eliminar:
+	Cross fade audio	Fundido encadenado de audio
+	Preview:	Vista previa:
+	Visible area	Área visible
+	Entire clip	Todo el clip
+	Entire sequence	Toda la secuencia
+	{count} silences detected ({sec}s)	{count} silencios detectados ({sec}s)
+	Detecting silences…	Detectando silencios…
+	Fast Selection Mode (High Performance)	Modo de selección rápida (alto rendimiento)
+	Fast Selection Mode active ({count} clips)	Modo de selección rápida activo ({count} clips)
+	Fast Selection Mode active	Modo de selección rápida activo
+	Approaching limit ({count}/{limit} clips) — click for Fast Selection Mode	Acercándose al límite ({count}/{limit} clips) — clic para modo de selección rápida
+	Fast Selection Mode activated ({count} clips selected) — high-performance rendering enabled	Modo de selección rápida activado ({count} clips seleccionados) — procesamiento de alto rendimiento habilitado
+	Approaching selection limit ({count}/{limit} clips) — Fast Selection Mode will activate at {limit} clips	Acercándose al límite de selección ({count}/{limit} clips) — El modo de selección rápida se activará con {limit} clips
+	Auto (Hardware when available)	Automático (Hardware si está disponible)
+	Codec	Códec
+	GPU Acceleration	Aceleración por GPU
+	Native / CPU (Software x264)	Nativo / CPU (x264 por software)
+	Heavy Selection Detected	Alta carga de selección detectada
+	Selecting {count} clips in Traditional Mode can freeze the application. Switch to Fast Selection Mode for high-performance editing.	Seleccionar {count} clips en modo tradicional puede congelar la aplicación. Cambia al modo de selección rápida para editar con alto rendimiento.
+	⚡ Switch to Fast Selection Mode	⚡ Cambiar a modo de selección rápida
+	Keep Traditional Mode	Mantener modo tradicional
+	Do not show this message again (remember choice)	No volver a mostrar este mensaje (recordar elección)
+	Apply Changes (Enter)	Aplicar cambios (Enter)
+	Cancel (Esc)	Cancelar (Esc)
+	Pending Move: {count} clips ({offset})	Movimiento pendiente: {count} clips ({offset})
+	Macro Timeline	Línea de tiempo macro
+	Show Macro Timeline (Dual View)	Mostrar línea de tiempo macro (vista dual)
+	Toggle Macro Timeline (Dual View)	Alternar línea de tiempo macro (vista dual)
+	⚡ Fast Mode: ON	⚡ Modo rápido: ACTIVADO
+	Fast Mode: OFF	Modo rápido: DESACTIVADO
+	Clip at playhead	Solo clip en la timeline
+	Entire track	Toda la pista
+	Only for the clip at the timeline playhead	Solo para el clip en el que está la línea de la timeline
+	Work for the entire track	Trabajar para toda la pista
+	Track	Pista

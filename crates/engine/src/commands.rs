@@ -350,31 +350,86 @@ pub(crate) fn item_p(p: &Value, k: &str) -> Option<ItemId> {
 /// clip a moved clip lands inside is split in two). With `copy: true` (Option-drag) the clips stay
 /// where they are and copies land at the destinations instead; the copies are selected and listed
 /// as `copied`.
+fn shift_seq_track(seq: &filmcraft_project::Sequence, tid: TrackId, delta: i32) -> TrackId {
+    if delta == 0 {
+        return tid;
+    }
+    for tracks in [&seq.video_tracks, &seq.audio_tracks] {
+        if let Some(i) = tracks.iter().position(|t| t.id == tid) {
+            let ni = (i as i32 + delta).clamp(0, tracks.len() as i32 - 1) as usize;
+            return tracks[ni].id;
+        }
+    }
+    tid
+}
+
 fn move_clips(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "timeline.move";
     let mut listed: Vec<(ClipId, TrackId, Tick, bool)> = Vec::new();
-    for m in p.get("moves").and_then(Value::as_array).into_iter().flatten() {
-        let new_track = str_p(m, "track").is_some_and(|t| t.eq_ignore_ascii_case("new"));
-        let track = if new_track {
-            let clip = clip_p(m, "clip").ok_or_else(|| bad(CMD, "new track needs a clip"))?;
-            let q = s.active_sequence().ok_or(EngineError::NoSequence)?;
-            let (source, _) = q.find_item(clip).ok_or(edit::EditError::NoItem(clip))?;
-            if q.track(source).is_some_and(|t| t.locked) {
-                return Err(edit::EditError::Locked.into());
-            }
-            if m.get("time").and_then(Value::as_i64).is_none() {
-                return Err(bad(CMD, "new track needs a time"));
-            }
-            Some(source)
+    if let Some(offset_val) = p.get("offset").and_then(Value::as_i64) {
+        let offset = Tick(offset_val);
+        let track_delta = p.get("trackDelta").and_then(Value::as_i64).unwrap_or(0) as i32;
+        let is_all = bool_p(p, "all").unwrap_or(false);
+        let copy = bool_p(p, "copy").unwrap_or(false);
+        if is_all && track_delta == 0 && !copy {
+            s.edit_sequence("Move", |q, _, _| {
+                for tr in q.all_tracks_mut() {
+                    if !tr.locked {
+                        for it in &mut tr.items {
+                            it.start = (it.start + offset).max(Tick::ZERO);
+                        }
+                        for trn in &mut tr.transitions {
+                            trn.start = (trn.start + offset).max(Tick::ZERO);
+                        }
+                    }
+                }
+                Ok(())
+            })?;
+            return Ok(json!({}));
+        }
+        let q = s.active_sequence().ok_or(EngineError::NoSequence)?;
+        let clips_to_move: Vec<ClipId> = if is_all {
+            q.all_tracks().filter(|t| !t.locked).flat_map(|t| t.items.iter().map(|i| i.id)).collect()
+        } else if let Some(arr) = p.get("clips").and_then(Value::as_array) {
+            arr.iter().filter_map(|v| v.as_u64().map(ClipId)).collect()
         } else {
-            track_p(s, m, "track", CMD)?
+            s.state.selection.clone()
         };
-        if let (Some(clip), Some(track), Some(time)) = (clip_p(m, "clip"), track, m.get("time").and_then(Value::as_i64)) {
-            listed.push((clip, track, Tick(time), new_track));
+        let item_map: std::collections::HashMap<ClipId, (TrackId, Tick)> =
+            q.all_tracks().flat_map(|t| t.items.iter().map(move |i| (i.id, (t.id, i.start)))).collect();
+        for c in clips_to_move {
+            if let Some(&(tid, start)) = item_map.get(&c) {
+                if q.track(tid).is_some_and(|t| t.locked) {
+                    continue;
+                }
+                let dest_track = shift_seq_track(q, tid, track_delta);
+                listed.push((c, dest_track, (start + offset).max(Tick::ZERO), false));
+            }
+        }
+    } else {
+        for m in p.get("moves").and_then(Value::as_array).into_iter().flatten() {
+            let new_track = str_p(m, "track").is_some_and(|t| t.eq_ignore_ascii_case("new"));
+            let track = if new_track {
+                let clip = clip_p(m, "clip").ok_or_else(|| bad(CMD, "new track needs a clip"))?;
+                let q = s.active_sequence().ok_or(EngineError::NoSequence)?;
+                let (source, _) = q.find_item(clip).ok_or(edit::EditError::NoItem(clip))?;
+                if q.track(source).is_some_and(|t| t.locked) {
+                    return Err(edit::EditError::Locked.into());
+                }
+                if m.get("time").and_then(Value::as_i64).is_none() {
+                    return Err(bad(CMD, "new track needs a time"));
+                }
+                Some(source)
+            } else {
+                track_p(s, m, "track", CMD)?
+            };
+            if let (Some(clip), Some(track), Some(time)) = (clip_p(m, "clip"), track, m.get("time").and_then(Value::as_i64)) {
+                listed.push((clip, track, Tick(time), new_track));
+            }
         }
     }
     if listed.is_empty() {
-        return Err(bad(CMD, "need `moves`"));
+        return Err(bad(CMD, "need `moves` or non-empty `offset`"));
     }
     let follow = bool_p(p, "linked").unwrap_or(s.state.linked_selection);
     let q = s.active_sequence().ok_or(EngineError::NoSequence)?;
@@ -2784,21 +2839,26 @@ fn build() -> Vec<CommandSpec> {
             s.state.transition_selection.clear();
             s.state.gap_selection = None;
             if bool_p(p, "toggle").unwrap_or(false) {
+                let mut existing: std::collections::HashSet<ClipId> = s.state.selection.iter().copied().collect();
+                let mut to_add = Vec::new();
                 for c in clips {
-                    if let Some(i) = s.state.selection.iter().position(|x| *x == c) {
-                        s.state.selection.remove(i);
-                    } else {
-                        s.state.selection.push(c);
+                    if !existing.remove(&c) {
+                        existing.insert(c);
+                        to_add.push(c);
                     }
                 }
+                s.state.selection.retain(|c| existing.contains(c));
+                s.state.selection.extend(to_add);
             } else if bool_p(p, "add").unwrap_or(false) {
+                let mut existing: std::collections::HashSet<ClipId> = s.state.selection.iter().copied().collect();
                 for c in clips {
-                    if !s.state.selection.contains(&c) {
+                    if existing.insert(c) {
                         s.state.selection.push(c);
                     }
                 }
             } else {
-                s.state.selection = clips;
+                let mut seen = std::collections::HashSet::with_capacity(clips.len());
+                s.state.selection = clips.into_iter().filter(|c| seen.insert(*c)).collect();
                 s.state.caption_selection.clear();
             }
             Ok(json!({"selection": s.state.selection.iter().map(|c| c.0).collect::<Vec<_>>()}))

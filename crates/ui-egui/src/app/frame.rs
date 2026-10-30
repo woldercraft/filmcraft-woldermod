@@ -58,7 +58,7 @@ impl FilmcraftApp {
         if self.ui.show_header {
             header::show(self, ui, header);
         }
-        let status_h = if self.ui.show_status_bar { 20.0 } else { 0.0 };
+        let status_h = if self.ui.show_status_bar { 26.0 } else { 0.0 };
         let body = egui::Rect::from_min_max(egui::pos2(full.min.x + 1.0, header.max.y + 1.0), egui::pos2(full.max.x - 1.0, full.max.y - status_h - 2.0));
         match self.ui.mode {
             state::Mode::Edit => self.dock_area(ui, body),
@@ -72,9 +72,10 @@ impl FilmcraftApp {
         if !self.ui.show_status_bar {
             return;
         }
-        // Status / hint bar
+        // Status / hint bar & DaVinci Resolve bottom navigation bar
         let sb = egui::Rect::from_min_max(egui::pos2(full.min.x, full.max.y - status_h), full.max);
         ui.painter().rect_filled(sb, 0.0, t.header_bg);
+        ui.painter().line_segment([sb.left_top(), sb.right_top()], egui::Stroke::new(1.0, egui::Color32::BLACK));
         let now = ui.input(|i| i.time);
         if self.ui.status != self.status_seen.0 {
             self.status_seen = (self.ui.status.clone(), now);
@@ -85,12 +86,78 @@ impl FilmcraftApp {
                 ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
             }
         }
-        let hint = if !self.ui.status.is_empty() { self.ui.status.clone() } else { self.hint_text() };
-        ui.painter().text(egui::pos2(sb.min.x + 10.0, sb.center().y), egui::Align2::LEFT_CENTER, hint, Tokens::ui(11.0), t.text_dim);
-        let resp = ui.interact(sb, egui::Id::unique("status-bar"), egui::Sense::click());
-        if resp.clicked() {
-            self.ui.status.clear();
+
+        // Center: DaVinci Resolve bottom page navigation (Projects, Edit, Color, Export)
+        let nav_items: [(&str, &str, crate::icons::Icon); 4] = [
+            ("projects", tl!("Projects"), crate::icons::Icon::Folder),
+            ("edit", tl!("Edit"), crate::icons::Icon::Film),
+            ("color", tl!("Color"), crate::icons::Icon::Adjust),
+            ("export", tl!("Export"), crate::icons::Icon::Export),
+        ];
+        let total_tabs_w = nav_items.len() as f32 * 110.0;
+        let mut tab_x = (sb.center().x - total_tabs_w / 2.0).max(sb.min.x + 200.0);
+        let start_tab_x = tab_x;
+
+        // Left side: transient status / error notifications only (no persistent tool hints)
+        if !self.ui.status.is_empty() {
+            let max_w = (start_tab_x - sb.min.x - 20.0).max(100.0);
+            let galley = ui.painter().layout(self.ui.status.clone(), Tokens::ui(11.0), t.text_dim, max_w);
+            let status_rect = egui::Rect::from_min_size(egui::pos2(sb.min.x + 10.0, sb.center().y - galley.size().y / 2.0), galley.size());
+            ui.painter().galley_with_override_text_color(status_rect.min, galley, t.text_dim);
+            let resp = ui.interact(status_rect, egui::Id::unique("status-bar-text"), egui::Sense::click());
+            if resp.clicked() {
+                self.ui.status.clear();
+            }
         }
+        for (id, label, icon) in nav_items {
+            let active = match id {
+                "projects" => self.ui.mode == state::Mode::Import,
+                "edit" => self.ui.mode == state::Mode::Edit && self.ui.workspace != "Color",
+                "color" => self.ui.mode == state::Mode::Edit && self.ui.workspace == "Color",
+                "export" => self.ui.mode == state::Mode::Export,
+                _ => false,
+            };
+            let tab_r = egui::Rect::from_min_size(egui::pos2(tab_x, sb.min.y + 2.0), egui::vec2(104.0, sb.height() - 4.0));
+            let tresp = ui.interact(tab_r, egui::Id::unique(("bottom_nav", id)), egui::Sense::click());
+            self.auto.add(&format!("header.mode.{}", id), tab_r, label);
+            self.auto.add(&format!("bottom_nav.{}", id), tab_r, label);
+
+            if tresp.hovered() {
+                ui.painter().rect_filled(tab_r, 4.0, t.hover);
+            }
+            if active {
+                ui.painter().rect_filled(tab_r, 4.0, t.accent.gamma_multiply(0.20));
+                ui.painter().line_segment(
+                    [egui::pos2(tab_r.min.x + 12.0, tab_r.max.y - 1.0), egui::pos2(tab_r.max.x - 12.0, tab_r.max.y - 1.0)],
+                    egui::Stroke::new(2.0, t.accent),
+                );
+            }
+
+            let col = if active { t.tab_text_active } else if tresp.hovered() { t.text } else { t.text_dim };
+            let icon_r = egui::Rect::from_center_size(egui::pos2(tab_r.min.x + 18.0, tab_r.center().y), egui::vec2(14.0, 14.0));
+            crate::icons::paint(ui.painter(), icon_r, icon, col);
+            ui.painter().text(egui::pos2(tab_r.min.x + 32.0, tab_r.center().y), egui::Align2::LEFT_CENTER, label, Tokens::ui(12.0), col);
+
+            if tresp.clicked() {
+                match id {
+                    "projects" => self.ui.mode = state::Mode::Import,
+                    "edit" => {
+                        self.ui.mode = state::Mode::Edit;
+                        if self.ui.workspace == "Color" {
+                            self.set_workspace("Editing");
+                        }
+                    }
+                    "color" => {
+                        self.ui.mode = state::Mode::Edit;
+                        self.set_workspace("Color");
+                    }
+                    "export" => self.ui.mode = state::Mode::Export,
+                    _ => {}
+                }
+            }
+            tab_x += 110.0;
+        }
+
         self.job_status(ui, sb, &t);
     }
 
@@ -160,6 +227,7 @@ impl FilmcraftApp {
     }
 
     /// Contextual hint for the status bar (Premiere shows tool/gesture hints here).
+    #[allow(dead_code)]
     fn hint_text(&self) -> String {
         let mac = cfg!(target_os = "macos");
         match self.ui.tool {

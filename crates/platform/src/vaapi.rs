@@ -14,6 +14,8 @@ pub mod ffi;
 pub mod h264;
 pub mod hevc;
 #[cfg(target_os = "linux")]
+pub mod export;
+#[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 pub mod va;
 

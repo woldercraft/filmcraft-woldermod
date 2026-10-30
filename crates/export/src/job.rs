@@ -60,8 +60,8 @@
 //!   waiting for the render (large: render-bound; near zero: encode-bound).
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use filmcraft_isobmff::{Brand, Mp4Writer, PcmConfig, SampleEntry, TrackConfig, WriteSample, WriterOptions};
 use filmcraft_project::{ItemId, Project};
@@ -72,7 +72,7 @@ use rayon::prelude::*;
 use crate::audio_out::AudioOut;
 use crate::mxf_out::{MxfMux, MxfSetup};
 use crate::pipeline::Pipeline;
-use crate::settings::{AudioCodec, BitrateMode};
+use crate::settings::{AudioCodec, BitrateMode, ColorConversion};
 use crate::{
     AudioEncoder, ColorSignal, EncodedPacket, EncoderFrame, ExportError, ExportSettings, Format, H264Pass, Out, PrepareAhead, Progress, Report, Result, Stage,
     VideoEncoder, audio_factories, export_range, frame_span, note_stage, timed, video_factories,
@@ -116,11 +116,34 @@ struct Ahead {
 /// `prepare` (the encoder's [`VideoEncoder::prepare_ahead`]) then works on each frame, numbered
 /// from `f0` like [`EncoderFrame::index`].
 fn render_batch(pipe: &Pipeline, f: i64, end: i64, sources: &dyn SourceProvider, prepare: Option<&PrepareAhead>, f0: i64) -> Option<Vec<Frame>> {
+    let count = usize::try_from((end - f).max(0)).unwrap_or(0);
+    if count == 0 {
+        return Some(Vec::new());
+    }
     let pending = AtomicBool::new(false);
-    let frames: Vec<Frame> = (f..end)
-        .into_par_iter()
-        .map(|fi| {
-            let frame = pipe.frame(fi, sources);
+
+    // 1. Plan and decode all eligible frames in strict sequential ascending order (0..count).
+    // This eliminates Rayon work-stealing jitter in GopCache, preventing backward seeks and decoder
+    // resets when batches span cuts between clips of the same source file.
+    let mut plans = Vec::with_capacity(count);
+    for i in 0..count {
+        let fi = f + i as i64;
+        let plan = pipe.plan_frame(fi, sources);
+        if filmcraft_media::pending::take() {
+            pending.store(true, Ordering::Relaxed);
+        }
+        plans.push(plan);
+    }
+    if pending.load(Ordering::Relaxed) {
+        return None;
+    }
+
+    // 2. Render all frames in parallel on the GPU / Rayon worker threads.
+    let slots: Vec<Mutex<Option<Frame>>> = (0..count).map(|_| Mutex::new(None)).collect();
+    plans.into_par_iter().enumerate().for_each(|(i, plan)| {
+        if let Some(slot) = slots.get(i) {
+            let fi = f + i as i64;
+            let frame = pipe.render_plan_or_frame(fi, plan, sources);
             if filmcraft_media::pending::take() {
                 pending.store(true, Ordering::Relaxed);
             }
@@ -128,10 +151,17 @@ fn render_batch(pipe: &Pipeline, f: i64, end: i64, sources: &dyn SourceProvider,
                 let index = u64::try_from(fi - f0).unwrap_or(u64::MAX);
                 prepare(&EncoderFrame { width: pipe.w, height: pipe.h, rgba: &frame.0, hdr: pipe.hdr_out.then_some(frame.1.as_slice()), index });
             }
-            frame
-        })
-        .collect();
-    (!pending.load(Ordering::Relaxed)).then_some(frames)
+            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(frame);
+        }
+    });
+    if pending.load(Ordering::Relaxed) {
+        return None;
+    }
+    let mut frames = Vec::with_capacity(count);
+    for slot in slots {
+        frames.push(slot.into_inner().unwrap_or_else(|e| e.into_inner())?);
+    }
+    Some(frames)
 }
 
 /// What encoding a batch came to.
@@ -258,6 +288,7 @@ impl Exporter {
             progress.set_status(format!("Exporting {} frames ({})", nframes, settings.format.label()));
         }
         let venc = make_venc(&settings, pipe.w, pipe.h, pipe.rate)?;
+        pipe.set_nv12(settings.color_conversion == ColorConversion::Auto && venc.accepts_nv12());
         let brand = if settings.format.is_mp4_with(settings.multiplexer) { Brand::Mp4 } else { Brand::Mov };
         let audio = if settings.has_audio() { Some(AudioOut::new(project.clone(), seq, &settings, range)?) } else { None };
         let aenc: Option<Box<dyn AudioEncoder>> = match (&audio, settings.audio_codec()) {
@@ -277,7 +308,7 @@ impl Exporter {
             next: f0,
             batch: rayon::current_num_threads().clamp(2, 16) as i64,
             overlap: true,
-            budget: IN_FLIGHT_BUDGET,
+            budget: if cfg!(test) { IN_FLIGHT_BUDGET } else { IN_FLIGHT_BUDGET * 2 },
             ahead: None,
             overlapped_steps: 0,
             brand,
@@ -477,6 +508,7 @@ impl Exporter {
             let stats = self.venc.pass_stats().ok_or_else(|| ExportError::Encode("two-pass statistics missing".into()))?;
             self.settings.h264_pass = H264Pass::Second(stats);
             self.venc = make_venc(&self.settings, self.pipe.w, self.pipe.h, self.pipe.rate)?;
+            self.pipe.set_nv12(self.settings.color_conversion == ColorConversion::Auto && self.venc.accepts_nv12());
             self.first_pass = false;
             self.next = self.f0;
             return Ok(Step::Progress);

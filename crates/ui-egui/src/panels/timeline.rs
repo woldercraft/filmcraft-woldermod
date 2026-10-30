@@ -9,7 +9,7 @@
 //! damped exponential easing, anchored under the cursor) so navigation feels fluid; all geometry is
 //! drawn as GPU meshes by egui's wgpu backend and culled to the visible range.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use egui::{Align2, Color32, CursorIcon, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
@@ -82,8 +82,32 @@ const DUPLICATE_FRAME_COLORS: [Color32; filmcraft_engine::sequence_tools::DUPLIC
 ];
 const SNAP_PX: f32 = 9.0;
 
+/// Selection count where the Timeline warns and prompts for Fast Selection Mode.
+pub const FAST_SELECTION_WARN_THRESHOLD: usize = 35;
+/// Selection count where Fast Selection Mode (High Performance) automatically activates.
+pub const FAST_SELECTION_LIMIT: usize = 70;
+
 /// Waveform peaks are kept per audio stream: (item, index into the media's `audio_streams`).
 pub type PeakKey = (ItemId, usize);
+
+/// Preview of silence removal cut ranges on the timeline.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SilencePreview {
+    pub key: (i64, i64, i64, i64, bool, Option<(i64, i64)>),
+    pub ranges: Vec<TimeRange>,
+    pub total_seconds: f64,
+}
+
+#[derive(Clone, Debug)]
+pub struct PendingMove {
+    pub clips: Arc<Vec<ClipId>>,
+    pub offset: Tick,
+    pub track_delta: i32,
+    pub new_track: Option<(TrackKind, Rect)>,
+    pub copy: bool,
+    pub bounds: (Tick, Tick),
+    pub all_unlocked: bool,
+}
 
 /// Transient interaction state.
 #[derive(Default)]
@@ -110,6 +134,23 @@ pub struct TlState {
     zoom_anchor: Option<(f64, f32)>,
     /// The zoom (points a second) the video thumbnails are laid out at while the view is zooming (#1094).
     thumb_pps: Option<f64>,
+    pub silence_preview: Option<SilencePreview>,
+    pub silence_change_time: Option<f64>,
+    pub silence_last_key: Option<(i64, i64, i64, i64, bool, Option<(i64, i64)>)>,
+    /// Whether the approaching-limit warning toast/status has been shown for the current selection.
+    pub fast_mode_warned: bool,
+    /// Whether the auto-activated Fast Selection Mode toast/status has been shown for the current selection.
+    pub fast_mode_auto_notified: bool,
+    /// When selecting many clips in traditional mode, prompts the user to switch to Fast Selection Mode.
+    pub fast_mode_prompt: Option<usize>,
+    /// Whether the user dismissed the prompt for the current selection gesture.
+    pub fast_mode_prompt_dismissed: bool,
+    /// Selection lookup cache for instant O(1) membership queries when many clips are selected.
+    pub selection_cache: Option<(usize, Option<ClipId>, Option<ClipId>, Arc<HashSet<ClipId>>)>,
+    /// A pending move waiting for user confirmation before committing changes to the project.
+    pub pending_move: Option<PendingMove>,
+    /// Anchor clip for range/chain selection (Shift-click, Ctrl+Shift-click).
+    pub selection_anchor: Option<ClipId>,
     /// Show Duplicate Frame Markers: the markers of a sequence, with the session revision, the
     /// sequence and the project they were worked out for.
     duplicates: Option<(DuplicatesKey, DuplicateMarkers)>,
@@ -317,6 +358,8 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     let layout = Layout { content, ruler, rows: rows.clone(), pps, scroll, split_y };
     app.tl.layout = Some(layout.clone());
+    let visible = (layout.tick_at(content.min.x), layout.tick_at(content.max.x));
+    update_silence_preview(app, &ctx, &layout, visible, seq_id);
 
     // ---- backgrounds
     painter.rect_filled(Rect::from_min_max(pos2(content.min.x, content.min.y), content.max), 0.0, t.tl_bg);
@@ -351,6 +394,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
 
     // ---- clips
     draw_clips(app, &ctx, &painter, seq, seq_id, &rows, &layout, content, vclip, aclip, rate, t);
+    paint_silence_preview(&painter, &layout, content, app);
 
     // An existing clip dragged past the outer row previews its new destination (#1187).
     if let Some(Drag::Move { clips, offset, new_track: Some((kind, band)), .. }) = app.tl.drag.clone() {
@@ -1136,5 +1180,101 @@ mod ruler_tests {
         }
         let (minor, label) = ruler_steps(1.0, i64::MAX);
         assert!(minor >= 1 && label >= 1 && label % minor == 0, "an unrepresentable rate: tick {minor}, label {label}");
+    }
+}
+
+fn update_silence_preview(app: &mut FilmcraftApp, ctx: &egui::Context, _layout: &Layout, visible: (Tick, Tick), seq_id: ItemId) {
+    let Some(d) = app.ui.clip_dialog.as_ref() else {
+        if app.tl.silence_preview.is_some() || app.tl.silence_change_time.is_some() || app.tl.silence_last_key.is_some() {
+            app.tl.silence_preview = None;
+            app.tl.silence_change_time = None;
+            app.tl.silence_last_key = None;
+        }
+        return;
+    };
+    if !d.command.ends_with(".removeSilence") {
+        if app.tl.silence_preview.is_some() || app.tl.silence_change_time.is_some() || app.tl.silence_last_key.is_some() {
+            app.tl.silence_preview = None;
+            app.tl.silence_change_time = None;
+            app.tl.silence_last_key = None;
+        }
+        return;
+    }
+
+    let p = &d.params;
+    let threshold = p.get("threshold").and_then(Value::as_f64).unwrap_or(-30.6) as f32;
+    let pre_head = p.get("preHead").and_then(Value::as_i64).unwrap_or(10) as usize;
+    let post_tail = p.get("postTail").and_then(Value::as_i64).unwrap_or(12) as usize;
+    let min_strip = p.get("minStrip").and_then(Value::as_i64).unwrap_or(23) as usize;
+    let is_clip = d.command.starts_with("clip.");
+    let scope = p.get("previewScope").and_then(Value::as_str).unwrap_or(if is_clip { "all" } else { "visible" });
+    let is_all = scope == "all";
+
+    let bounds = if is_all { None } else { Some(TimeRange::from_bounds(visible.0, visible.1)) };
+
+    let clips: Vec<ClipId> = p.get("clips").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_u64().map(ClipId)).collect()).unwrap_or_default();
+
+    let key = ((threshold * 100.0) as i64, pre_head as i64, post_tail as i64, min_strip as i64, is_all, bounds.map(|b| (b.start.0, b.duration.0)));
+
+    let now = ctx.input(|i| i.time);
+
+    if app.tl.silence_last_key.as_ref() != Some(&key) {
+        app.tl.silence_last_key = Some(key);
+        app.tl.silence_change_time = Some(now);
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        return;
+    }
+
+    if let Some(t_change) = app.tl.silence_change_time {
+        if now - t_change < 0.25 {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            return;
+        }
+        app.tl.silence_change_time = None;
+        let clips_slice = if clips.is_empty() { None } else { Some(clips.as_slice()) };
+        if let Ok(ranges) =
+            filmcraft_engine::sequence_tools::detect_silence_ranges(&app.session, seq_id, bounds, clips_slice, threshold, pre_head, post_tail, min_strip)
+        {
+            let total_ticks: i64 = ranges.iter().map(|r| r.duration.0).sum();
+            let total_seconds = total_ticks as f64 / filmcraft_time::TICKS_PER_SECOND as f64;
+            app.tl.silence_preview = Some(SilencePreview { key, ranges, total_seconds });
+            ctx.request_repaint();
+        }
+    }
+}
+
+fn paint_silence_preview(p: &egui::Painter, layout: &Layout, content: Rect, app: &FilmcraftApp) {
+    let Some(prev) = &app.tl.silence_preview else { return };
+    if !app.ui.clip_dialog.as_ref().is_some_and(|d| d.command.ends_with(".removeSilence")) {
+        return;
+    }
+    let fill = Color32::from_rgba_unmultiplied(235, 45, 45, 65);
+    let cut_stroke = Stroke::new(1.5, Color32::from_rgb(255, 65, 65));
+    for r in &prev.ranges {
+        let x0 = layout.x_of(r.start);
+        let x1 = layout.x_of(r.end());
+        if x1 < content.min.x || x0 > content.max.x {
+            continue;
+        }
+        let draw_x0 = x0.max(content.min.x);
+        let draw_x1 = x1.min(content.max.x);
+        if draw_x1 > draw_x0 {
+            let rect = Rect::from_min_max(pos2(draw_x0, content.min.y), pos2(draw_x1, content.max.y));
+            p.rect_filled(rect, 0.0, fill);
+        }
+        if x0 >= content.min.x && x0 <= content.max.x {
+            p.line_segment([pos2(x0, content.min.y), pos2(x0, content.max.y)], cut_stroke);
+            p.line_segment([pos2(x0 - 3.0, content.min.y), pos2(x0 + 3.0, content.min.y + 6.0)], cut_stroke);
+            p.line_segment([pos2(x0 - 3.0, content.max.y), pos2(x0 + 3.0, content.max.y - 6.0)], cut_stroke);
+        }
+        if x1 >= content.min.x && x1 <= content.max.x {
+            p.line_segment([pos2(x1, content.min.y), pos2(x1, content.max.y)], cut_stroke);
+            p.line_segment([pos2(x1 + 3.0, content.min.y), pos2(x1 - 3.0, content.min.y + 6.0)], cut_stroke);
+            p.line_segment([pos2(x1 + 3.0, content.max.y), pos2(x1 - 3.0, content.max.y - 6.0)], cut_stroke);
+        }
+        if draw_x1 - draw_x0 > 36.0 {
+            let sec = r.duration.0 as f64 / TICKS_PER_SECOND as f64;
+            p.text(pos2((draw_x0 + draw_x1) * 0.5, content.min.y + 12.0), Align2::CENTER_CENTER, format!("−{sec:.2}s"), Tokens::ui(10.5), Color32::WHITE);
+        }
     }
 }

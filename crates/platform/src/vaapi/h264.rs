@@ -172,7 +172,8 @@ impl<A: Accel> Front<A> {
     }
 
     fn handle_slice(&mut self, nal: &[u8], hdr: NalHeader, pts: i64, frames: &mut Vec<DecodedFrame>) -> Result<()> {
-        let rbsp = unescape_rbsp(nal.get(1..).unwrap_or_default());
+        let payload = nal.get(1..).unwrap_or_default();
+        let rbsp = unescape_rbsp(&payload[..payload.len().min(4096)]);
         let (ppss, spss) = (&self.ppss, &self.spss);
         let mut found: Option<(Arc<Pps>, Arc<Sps>)> = None;
         let (sh, _, _) = SliceHeader::parse(&rbsp, hdr, |id| {
@@ -181,6 +182,20 @@ impl<A: Accel> Front<A> {
             let sps = spss.get(pps.sps_id as usize).and_then(Option::as_ref).ok_or_else(|| missing(format!("SPS {}", pps.sps_id)))?;
             found = Some((pps.clone(), sps.clone()));
             Ok((&**pps, &**sps))
+        })
+        .or_else(|e| {
+            if payload.len() > 4096 {
+                let full_rbsp = unescape_rbsp(payload);
+                SliceHeader::parse(&full_rbsp, hdr, |id| {
+                    let missing = |what: String| filmcraft_h264::Error::MissingParameterSet(what);
+                    let pps = ppss.get(id as usize).and_then(Option::as_ref).ok_or_else(|| missing(format!("PPS {id}")))?;
+                    let sps = spss.get(pps.sps_id as usize).and_then(Option::as_ref).ok_or_else(|| missing(format!("SPS {}", pps.sps_id)))?;
+                    found = Some((pps.clone(), sps.clone()));
+                    Ok((&**pps, &**sps))
+                })
+            } else {
+                Err(e)
+            }
         })
         .map_err(decode_err)?;
         let Some((pps, sps)) = found else { return Err(decode_err("slice without a PPS")) };

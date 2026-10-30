@@ -43,6 +43,7 @@ pub mod export_renderer;
 pub mod fx;
 pub mod lut;
 pub mod mask;
+mod nv12;
 mod transition;
 pub use export_renderer::ExportRenderer;
 pub use lut::GpuLut;
@@ -53,7 +54,8 @@ pub use mask::GpuMask;
 pub const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const ACCUM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
-struct Uploaded {
+#[derive(Clone)]
+pub(crate) struct Uploaded {
     /// Y, Cb, Cr (or the RGBA texture) and the alpha plane (the dummy texture when there is none).
     views: [wgpu::TextureView; 4],
     kind: u32,
@@ -66,6 +68,8 @@ struct Uploaded {
     /// and a freed buffer's address can be reused by a different frame (stale texture).
     _pixels: PixelData,
 }
+
+pub(crate) type SharedUploads = Arc<std::sync::Mutex<(u64, HashMap<(usize, u32, u32), Uploaded>)>>;
 
 pub struct GpuCompositor {
     device: wgpu::Device,
@@ -83,12 +87,16 @@ pub struct GpuCompositor {
     output: Option<(wgpu::Texture, wgpu::TextureView, (u32, u32))>,
     accum_readback_buf: Option<(wgpu::Buffer, u64)>,
     uploads: HashMap<(usize, u32, u32), Uploaded>,
+    shared_uploads: Option<SharedUploads>,
     clock: u64,
     dummy: wgpu::TextureView,
     /// The effect stage (None on devices without compute shaders or storage textures: layers
     /// with effects are then rendered on the CPU here).
     fx: Option<fx::FxStage>,
     transition: transition::PushStage,
+    /// GPU RGBA8 -> NV12 stage, created on first use (None until then or when the device rejects it).
+    nv12: Option<nv12::Nv12Stage>,
+    nv12_unavailable: bool,
     transition_inputs: [Option<(wgpu::Texture, wgpu::TextureView, (u32, u32))>; 2],
     pub gpu_transitions: u64,
     pub cpu_transitions: u64,
@@ -177,6 +185,12 @@ pub fn f16_to_f32_fast(h: u16) -> f32 {
     } else {
         f16_to_f32(h)
     }
+}
+
+/// 65536-entry lookup table: IEEE half (`u16`) → `f32` (256 KiB, fits in L2 cache).
+fn f16_to_f32_table() -> &'static [f32] {
+    static TABLE: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| (0..=u16::MAX).map(f16_to_f32_fast).collect())
 }
 
 /// Half-float texel data for one frame (one byte vector per plane), converted off the UI thread.
@@ -419,15 +433,27 @@ impl GpuCompositor {
             output: None,
             accum_readback_buf: None,
             uploads: HashMap::new(),
+            shared_uploads: None,
             clock: 0,
             dummy,
             fx,
             transition: transition::PushStage::new(device),
+            nv12: None,
+            nv12_unavailable: false,
             transition_inputs: [None, None],
             gpu_transitions: 0,
             cpu_transitions: 0,
             uploaded_bytes: 0,
         }
+    }
+
+    pub(crate) fn with_shared_uploads(mut self, shared: SharedUploads) -> Self {
+        self.shared_uploads = Some(shared);
+        self
+    }
+
+    pub(crate) fn clear_uploads(&mut self) {
+        self.uploads.clear();
     }
 
     fn target(
@@ -489,6 +515,21 @@ impl GpuCompositor {
         self.clock += 1;
         if let Some(u) = self.uploads.get_mut(&key) {
             u.last_used = self.clock;
+            return key;
+        }
+        let shared_hit = self.shared_uploads.as_ref().and_then(|shared| {
+            let mut guard = shared.lock().ok()?;
+            guard.0 += 1;
+            let clk = guard.0;
+            let u = guard.1.get_mut(&key)?;
+            u.last_used = clk;
+            let mut cloned = u.clone();
+            cloned.last_used = self.clock;
+            Some(cloned)
+        });
+        if let Some(cloned) = shared_hit {
+            self.uploads.insert(key, cloned);
+            self.trim_uploads();
             return key;
         }
         let (w, h) = (f.width, f.height);
@@ -575,7 +616,28 @@ impl GpuCompositor {
                 }
             }
         };
+        if let Some(shared) = &self.shared_uploads
+            && let Ok(mut guard) = shared.lock()
+        {
+            guard.0 += 1;
+            let mut shared_up = up.clone();
+            shared_up.last_used = guard.0;
+            guard.1.insert(key, shared_up);
+            if guard.1.len() > 64 {
+                let remove_n = guard.1.len() - 64;
+                let mut v: Vec<(u64, (usize, u32, u32))> = guard.1.iter().map(|(k, u)| (u.last_used, *k)).collect();
+                v.sort_unstable();
+                for (_, k) in v.into_iter().take(remove_n) {
+                    guard.1.remove(&k);
+                }
+            }
+        }
         self.uploads.insert(key, up);
+        self.trim_uploads();
+        key
+    }
+
+    fn trim_uploads(&mut self) {
         // keep the most recent uploads (enough for several stacked layers + playback lookahead)
         if self.uploads.len() > 24 {
             let mut v: Vec<(u64, (usize, u32, u32))> = self.uploads.iter().map(|(k, u)| (u.last_used, *k)).collect();
@@ -584,7 +646,6 @@ impl GpuCompositor {
                 self.uploads.remove(&k);
             }
         }
-        key
     }
 
     /// The source description of an uploaded frame.
@@ -711,6 +772,23 @@ impl GpuCompositor {
     }
 
     fn render_plan(&mut self, plan: &FramePlan, prep: Option<&PreparedPlan>, clear: bool, resolve: bool) -> (wgpu::TextureView, (u32, u32)) {
+        if let FramePlan::Composite { width, height, steps } = plan {
+            return self.composite_steps(*width, *height, steps, prep);
+        }
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("filmcraft-composite") });
+        let res = self.record_plan(&mut enc, plan, prep, clear, resolve);
+        self.queue.submit([enc.finish()]);
+        res
+    }
+
+    fn record_plan(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        plan: &FramePlan,
+        prep: Option<&PreparedPlan>,
+        clear: bool,
+        resolve: bool,
+    ) -> (wgpu::TextureView, (u32, u32)) {
         let owned;
         let (w, h, layers): (u32, u32, &[PlanLayer]) = match plan {
             FramePlan::Layers { width, height, layers } => (*width as u32, *height as u32, layers.as_slice()),
@@ -729,7 +807,7 @@ impl GpuCompositor {
                     [PlanLayer { frame: Arc::new(frame), matrix: filmcraft_geom::Affine::IDENTITY, opacity: 1.0, blend: Blend::Normal, fx: None, input: None }];
                 (img.w as u32, img.h as u32, &owned[..])
             }
-            FramePlan::Composite { width, height, steps } => return self.composite_steps(*width, *height, steps, prep),
+            FramePlan::Composite { .. } => return (self.dummy.clone(), (1, 1)),
         };
         let (w, h) = (w.max(1), h.max(1));
         let accum_view = Self::target(&self.device, &mut self.accum, w, h, ACCUM_FORMAT, wgpu::TextureUsages::COPY_SRC);
@@ -863,7 +941,6 @@ impl GpuCompositor {
             layout: &self.final_bgl,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&accum_view) }],
         });
-        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("filmcraft-composite") });
         // Runs of fixed-function layers draw in one pass. A layer that reads the destination
         // ends it, copies the accumulator under its quad into the backdrop and draws on its own.
         let accum_tex = self.accum.as_ref().map(|a| a.0.clone());
@@ -874,13 +951,13 @@ impl GpuCompositor {
             // a layer's effects run right before it is drawn (pooled working textures are reused
             // by the next layer with effects)
             if let (Some(Some(job)), Some(f)) = (jobs.get(i), self.fx.as_ref()) {
-                f.record(&mut enc, job);
+                f.record(enc, job);
             }
             if let Some((bg, Some(region))) = bind_groups.get(i) {
                 i += 1;
                 let (Some(rect), Some(src), Some(dst)) = (region, &accum_tex, &backdrop_tex) else { continue };
                 if !cleared {
-                    accum_pass(&mut enc, &accum_view, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT));
+                    accum_pass(enc, &accum_view, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT));
                     cleared = true;
                 }
                 let origin = wgpu::Origin3d { x: rect.0, y: rect.1, z: 0 };
@@ -889,7 +966,7 @@ impl GpuCompositor {
                     wgpu::TexelCopyTextureInfo { texture: dst, mip_level: 0, origin, aspect: wgpu::TextureAspect::All },
                     wgpu::Extent3d { width: rect.2, height: rect.3, depth_or_array_layers: 1 },
                 );
-                let mut pass = accum_pass(&mut enc, &accum_view, wgpu::LoadOp::Load);
+                let mut pass = accum_pass(enc, &accum_view, wgpu::LoadOp::Load);
                 pass.set_pipeline(&self.blend_pipeline);
                 pass.set_bind_group(0, bg, &[]);
                 pass.draw(0..6, 0..1);
@@ -900,7 +977,7 @@ impl GpuCompositor {
             let breaks = |j: &usize| bind_groups.get(*j).is_some_and(|(_, r)| r.is_some()) || jobs.get(*j).is_some_and(Option::is_some);
             let end = (i + 1..bind_groups.len()).find(breaks).unwrap_or(bind_groups.len()).max(i);
             let load = if cleared { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT) };
-            let mut pass = accum_pass(&mut enc, &accum_view, load);
+            let mut pass = accum_pass(enc, &accum_view, load);
             cleared = true;
             pass.set_pipeline(&self.layer_pipeline);
             for (bg, _) in bind_groups.get(i..end).unwrap_or_default() {
@@ -927,7 +1004,6 @@ impl GpuCompositor {
             pass.set_bind_group(0, &final_bg, &[]);
             pass.draw(0..3, 0..1);
         }
-        self.queue.submit([enc.finish()]);
         (if resolve { out_view } else { accum_view }, (w, h))
     }
 
@@ -972,12 +1048,64 @@ impl GpuCompositor {
             return None;
         }
         let t = std::time::Instant::now();
-        self.render_plan(plan, prep, true, false);
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("filmcraft-composite-export") });
+        self.record_plan(&mut enc, plan, prep, true, false);
         let size = self.copy_accumulator(&mut enc)?;
-        self.queue.submit([enc.finish()]);
+        let sub = self.queue.submit([enc.finish()]);
         export_renderer::timing::add_submit(t.elapsed());
-        self.map_accumulator(size)
+        self.map_accumulator(size, Some(sub))
+    }
+
+    /// Fast-path SDR export rendering over black: composites `plan` and resolves it on the GPU
+    /// (`fs_full`, `Rgba8Unorm`), cutting read-back bandwidth in half (4 B/px instead of 8 B/px)
+    /// and avoiding the intermediate CPU `Vec<f32>` buffer and CPU sRGB conversion.
+    pub fn render_export_rgba8_prepared(&mut self, plan: &FramePlan, prep: Option<&PreparedPlan>) -> Option<(u32, u32, Vec<u8>)> {
+        if matches!(plan, FramePlan::Composite { .. }) {
+            return None;
+        }
+        let t = std::time::Instant::now();
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("filmcraft-composite-export-rgba8") });
+        self.record_plan(&mut enc, plan, prep, true, true);
+        let size = self.copy_output_staging(&mut enc)?;
+        let sub = self.queue.submit([enc.finish()]);
+        export_renderer::timing::add_submit(t.elapsed());
+        self.map_output_staging(size, Some(sub))
+    }
+
+    /// Like [`render_export_rgba8_prepared`](Self::render_export_rgba8_prepared), but the picture
+    /// is converted on the GPU to BT.709 limited-range NV12 and only that is read back
+    /// (`w * h * 3 / 2` bytes). `None` when the size does not fit the stage or the device cannot
+    /// run it; the caller then asks for RGBA8.
+    pub fn render_export_nv12_prepared(&mut self, plan: &FramePlan, prep: Option<&PreparedPlan>) -> Option<(u32, u32, Vec<u8>)> {
+        if matches!(plan, FramePlan::Composite { .. }) || self.nv12_unavailable {
+            return None;
+        }
+        let t = std::time::Instant::now();
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("filmcraft-composite-export-nv12") });
+        let (_, (w, h)) = self.record_plan(&mut enc, plan, prep, true, true);
+        if !nv12::Nv12Stage::fits(w, h) {
+            return None;
+        }
+        if self.nv12.is_none() {
+            let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let stage = nv12::Nv12Stage::new(&self.device);
+            match poll_now(scope.pop()) {
+                Some(None) => self.nv12 = Some(stage),
+                _ => {
+                    log::warn!("GPU NV12 conversion unavailable on this device, converting on the CPU");
+                    self.nv12_unavailable = true;
+                    return None;
+                }
+            }
+        }
+        let src = self.output.as_ref()?.1.clone();
+        let size = self.nv12.as_mut()?.record(&self.device, &self.queue, &mut enc, &src, w, h)?;
+        let sub = self.queue.submit([enc.finish()]);
+        export_renderer::timing::add_submit(t.elapsed());
+        let t = std::time::Instant::now();
+        let out = self.nv12.as_ref()?.map(&self.device, size, Some(sub))?;
+        export_renderer::timing::add_map_wait(t.elapsed());
+        Some((w, h, out))
     }
 
     /// Run the effect stage of a layer alone: `frame` decoded into its working image and `fx`
@@ -1021,14 +1149,14 @@ impl GpuCompositor {
             wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) } },
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
-        self.queue.submit([enc.finish()]);
+        let sub = self.queue.submit([enc.finish()]);
         stage.end_frame();
         let slice = buf.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        wait_mapped(&self.device)?;
+        wait_mapped(&self.device, Some(sub))?;
         rx.recv().ok()?.ok()?;
         let data = slice.get_mapped_range().ok()?;
         let mut out = Vec::with_capacity((w * h * 4) as usize);
@@ -1048,8 +1176,70 @@ impl GpuCompositor {
     pub fn read_accumulator(&mut self) -> Option<(u32, u32, Vec<f32>)> {
         let mut enc = self.device.create_command_encoder(&Default::default());
         let size = self.copy_accumulator(&mut enc)?;
-        self.queue.submit([enc.finish()]);
-        self.map_accumulator(size)
+        let sub = self.queue.submit([enc.finish()]);
+        self.map_accumulator(size, Some(sub))
+    }
+
+    /// Record a copy of the resolved RGBA8 output into the reusable staging buffer.
+    fn copy_output_staging(&mut self, enc: &mut wgpu::CommandEncoder) -> Option<(u32, u32, u32)> {
+        let (_, _, (w, h)) = self.output.as_ref()?;
+        let (w, h) = (*w, *h);
+        let row = w.checked_mul(4)?.div_ceil(256).checked_mul(256)?;
+        let needed = u64::from(row) * u64::from(h);
+        if self.accum_readback_buf.as_ref().is_none_or(|(_, size)| *size < needed) {
+            let b = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("accum-readback"),
+                size: needed,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            self.accum_readback_buf = Some((b, needed));
+        }
+        let (tex, _, _) = self.output.as_ref()?;
+        let (buf, _) = self.accum_readback_buf.as_ref()?;
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo { texture: tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo { buffer: buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) } },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        Some((w, h, row))
+    }
+
+    /// Wait for the staging buffer filled by [`copy_output_staging`](Self::copy_output_staging) and
+    /// copy out the tight RGBA8 pixels.
+    fn map_output_staging(&self, (w, h, row): (u32, u32, u32), sub: Option<wgpu::SubmissionIndex>) -> Option<(u32, u32, Vec<u8>)> {
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let t = std::time::Instant::now();
+        let (buf, _) = self.accum_readback_buf.as_ref()?;
+        let needed = u64::from(row) * u64::from(h);
+        let slice = buf.slice(..needed);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        wait_mapped(&self.device, sub)?;
+        rx.recv().ok()?.ok()?;
+        export_renderer::timing::add_map_wait(t.elapsed());
+        let t = std::time::Instant::now();
+        let (width, height, row) = (w as usize, h as usize, row as usize);
+        let row_bytes = width.checked_mul(4)?;
+        let total = row_bytes.checked_mul(height)?;
+        let data = slice.get_mapped_range().ok()?;
+        let out = if row == row_bytes {
+            data.get(..total)?.to_vec()
+        } else {
+            let mut v = Vec::with_capacity(total);
+            for y in 0..height {
+                v.extend_from_slice(data.get(y * row..y * row + row_bytes)?);
+            }
+            v
+        };
+        drop(data);
+        buf.unmap();
+        export_renderer::timing::add_convert(t.elapsed());
+        Some((w, h, out))
     }
 
     /// Record a copy of the accumulator into the staging buffer (grown when too small, reused
@@ -1080,29 +1270,31 @@ impl GpuCompositor {
 
     /// Wait for the staging buffer filled by [`copy_accumulator`](Self::copy_accumulator) and
     /// convert its half floats to f32.
-    fn map_accumulator(&self, (w, h, row): (u32, u32, u32)) -> Option<(u32, u32, Vec<f32>)> {
+    fn map_accumulator(&self, (w, h, row): (u32, u32, u32), sub: Option<wgpu::SubmissionIndex>) -> Option<(u32, u32, Vec<f32>)> {
         if w == 0 || h == 0 {
             return None;
         }
         let t = std::time::Instant::now();
         let (buf, _) = self.accum_readback_buf.as_ref()?;
-        let slice = buf.slice(..);
+        let needed = u64::from(row) * u64::from(h);
+        let slice = buf.slice(..needed);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        wait_mapped(&self.device)?;
+        wait_mapped(&self.device, sub)?;
         rx.recv().ok()?.ok()?;
         export_renderer::timing::add_map_wait(t.elapsed());
         let t = std::time::Instant::now();
         let (width, row) = (w as usize, row as usize);
         let mut out = filmcraft_frame::pool::take_f32_overwritten(width.checked_mul(h as usize)?.checked_mul(4)?);
         let data = slice.get_mapped_range().ok()?;
+        let table = f16_to_f32_table();
         // every row must be there: the pooled output holds stale values until written
         let converted = out.chunks_exact_mut(width * 4).enumerate().all(|(y, dst)| {
             let Some(src) = data.get(y * row..y * row + width * 8) else { return false };
             for (d, s) in dst.iter_mut().zip(src.as_chunks::<2>().0) {
-                *d = f16_to_f32_fast(u16::from_le_bytes(*s));
+                *d = table[usize::from(u16::from_le_bytes(*s))];
             }
             true
         });
@@ -1128,13 +1320,13 @@ impl GpuCompositor {
             wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(*h) } },
             wgpu::Extent3d { width: *w, height: *h, depth_or_array_layers: 1 },
         );
-        self.queue.submit([enc.finish()]);
+        let sub = self.queue.submit([enc.finish()]);
         let slice = buf.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        wait_mapped(&self.device)?;
+        wait_mapped(&self.device, Some(sub))?;
         rx.recv().ok()?.ok()?;
         let data = slice.get_mapped_range().ok()?;
         let mut out = Vec::with_capacity((w * h * 4) as usize);
@@ -1147,13 +1339,13 @@ impl GpuCompositor {
     }
 }
 
-/// Wait for the last submission and its `map_async` callbacks.
+/// Wait for `submission_index` (or the last submission when `None`) and its `map_async` callbacks.
 ///
 /// Export readback used `PollType::wait_indefinitely`. On radv that can never return after a
 /// failed hardware-encode attempt (#1058), so the export never finishes. Eight seconds is longer
 /// than a healthy map; a timeout returns `None` and the CPU renderer takes the frame.
-fn wait_mapped(device: &wgpu::Device) -> Option<()> {
-    device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(std::time::Duration::from_secs(8)) }).ok().map(|_| ())
+fn wait_mapped(device: &wgpu::Device, submission_index: Option<wgpu::SubmissionIndex>) -> Option<()> {
+    device.poll(wgpu::PollType::Wait { submission_index, timeout: Some(std::time::Duration::from_secs(8)) }).ok().map(|_| ())
 }
 
 /// Shader source: kind (0 RGBA8 sRGB, 1 linear premultiplied RGBA, 2 YUV), sampling scales, dimensions, color.
