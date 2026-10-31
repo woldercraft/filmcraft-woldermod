@@ -106,7 +106,7 @@ fn shared_state() -> Option<&'static SharedExportState> {
             if wgpu::Instance::enabled_backend_features().is_empty() {
                 return None;
             }
-            let instance = wgpu::Instance::default();
+            let instance = crate::adapter::native_instance();
             let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
             let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
             device.on_uncaptured_error(Arc::new(|e: wgpu::Error| mark_device_failed(&format!("GPU error: {e}"))));
@@ -157,6 +157,7 @@ impl ExportRenderer {
     /// wgpu backend.
     pub fn new() -> Option<Self> {
         let st = shared_state()?;
+
         if device_failed() {
             return None;
         }

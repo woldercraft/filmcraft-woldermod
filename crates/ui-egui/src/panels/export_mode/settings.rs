@@ -464,6 +464,13 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
         row(ui, t, tl!("Alpha"), |ui| {
             check(ui, reg, "export.video.alpha", &mut s.alpha, tl!("Include Alpha Channel"));
         });
+        if s.format == Format::Gif {
+            row(ui, t, "", |ui| {
+                let hint = tl!("When enabled, GIF transparency is on/off: alpha below 128 is transparent; 128 and above is opaque.");
+                let r = ui.add(egui::Label::new(hint).wrap());
+                reg.add("export.video.alpha.hint", r.rect, hint);
+            });
+        }
     }
     let gpu_short = gpu_name.map(|n| n.split(" (").next().unwrap_or(n).trim()).filter(|n| !n.is_empty());
     let hw_enc_available = filmcraft_engine::export::available(Format::Hevc);

@@ -86,6 +86,18 @@ impl FilmcraftApp {
                 ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
             }
         }
+        if self.ui.status.is_empty()
+            && let Some(notice) = &self.control_notice
+        {
+            match notice {
+                crate::ControlNotice::Token => {
+                    self.ui.status =
+                        tl!("The control server is disabled: FILMCRAFT_CONTROL_TOKEN must contain 64 random hex characters (see docs/control-protocol.md)")
+                            .into()
+                }
+            }
+        }
+
 
         // Center: DaVinci Resolve bottom page navigation (Projects, Edit, Color, Export)
         let nav_items: [(&str, &str, crate::icons::Icon); 4] = [
@@ -108,6 +120,7 @@ impl FilmcraftApp {
             if resp.clicked() {
                 self.ui.status.clear();
             }
+
         }
         for (id, label, icon) in nav_items {
             let active = match id {
