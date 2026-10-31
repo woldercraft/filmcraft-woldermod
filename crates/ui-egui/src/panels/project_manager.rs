@@ -53,6 +53,8 @@ pub struct ProjectManagerUi {
     pub modal_input: String,
     pub folders: Vec<String>,
     pub project_folders: HashMap<String, String>,
+    #[serde(skip)]
+    pub dragging_projects: Option<Vec<String>>,
 }
 
 impl Default for ProjectManagerUi {
@@ -72,6 +74,7 @@ impl Default for ProjectManagerUi {
             modal_input: String::new(),
             folders: vec!["YouTube".into(), "Clientes".into(), "Pruebas".into()],
             project_folders: HashMap::new(),
+            dragging_projects: None,
         }
     }
 }
@@ -431,6 +434,39 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut Ui, rect: Rect) {
 
     // 4. MODALS (New Project / New Folder / Rename)
     render_modals(app, ui, rect);
+
+    // Floating drag ghost preview when dragging projects
+    if let Some(ref dragged) = app.ui.project_browser.dragging_projects {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        if let Some(pos) = ui.ctx().pointer_latest_pos() {
+            let count = dragged.len();
+            let label = if count == 1 {
+                let name = Path::new(&dragged[0])
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "1 proyecto".into());
+                if name.len() > 22 {
+                    format!("📁 {}…", &name[..20])
+                } else {
+                    format!("📁 {name}")
+                }
+            } else {
+                format!("📁 Mover {count} proyectos")
+            };
+            let font = Tokens::semibold(12.0);
+            let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, Id::unique("pm-drag-tooltip")));
+            let galley = painter.layout_no_wrap(label, font, Color32::WHITE);
+            let badge_r = Rect::from_min_size(pos + vec2(16.0, 16.0), galley.size() + vec2(20.0, 12.0));
+            painter.rect_filled(badge_r, 5.0, Color32::from_rgb(32, 95, 190));
+            painter.rect_stroke(badge_r, 5.0, Stroke::new(1.5, Color32::from_rgb(90, 175, 255)), StrokeKind::Inside);
+            painter.galley(badge_r.min + vec2(10.0, 6.0), galley, Color32::WHITE);
+        }
+
+        // Release anywhere outside of a drop target clears drag state
+        if ui.input(|i| i.pointer.any_released()) {
+            app.ui.project_browser.dragging_projects = None;
+        }
+    }
 }
 
 fn render_top_bar(app: &mut FilmcraftApp, ui: &mut Ui, rect: Rect, total_count: usize) {
@@ -618,7 +654,20 @@ fn render_sidebar(app: &mut FilmcraftApp, ui: &mut Ui, rect: Rect, total_count: 
     let all_active = app.ui.project_browser.current_folder.is_none();
     let all_r = Rect::from_min_size(pos2(rect.min.x + 8.0, y), vec2(rect.width() - 16.0, 26.0));
     let all_resp = ui.interact(all_r, Id::unique("pm-folder-all"), Sense::click());
-    if all_active {
+    let is_dragging = app.ui.project_browser.dragging_projects.is_some();
+    let drop_on_all = is_dragging && all_resp.hovered();
+    if drop_on_all {
+        p.rect_filled(all_r, 4.0, Color32::from_rgb(40, 85, 140));
+        p.rect_stroke(all_r, 4.0, Stroke::new(1.5, Color32::from_rgb(80, 170, 255)), StrokeKind::Inside);
+        if ui.input(|i| i.pointer.any_released()) {
+            if let Some(paths) = app.ui.project_browser.dragging_projects.take() {
+                for path in paths {
+                    app.ui.project_browser.project_folders.remove(&path);
+                }
+                save_persisted_manager(app);
+            }
+        }
+    } else if all_active {
         p.rect_filled(all_r, 4.0, Color32::from_rgb(34, 45, 60));
     } else if all_resp.hovered() {
         p.rect_filled(all_r, 4.0, t.hover);
@@ -637,7 +686,19 @@ fn render_sidebar(app: &mut FilmcraftApp, ui: &mut Ui, rect: Rect, total_count: 
         let is_sel = app.ui.project_browser.current_folder.as_ref() == Some(f);
         let f_r = Rect::from_min_size(pos2(rect.min.x + 8.0, y), vec2(rect.width() - 16.0, 26.0));
         let f_resp = ui.interact(f_r, Id::unique(("pm-folder", f)), Sense::click());
-        if is_sel {
+        let drop_on_f = is_dragging && f_resp.hovered();
+        if drop_on_f {
+            p.rect_filled(f_r, 4.0, Color32::from_rgb(40, 85, 140));
+            p.rect_stroke(f_r, 4.0, Stroke::new(1.5, Color32::from_rgb(80, 170, 255)), StrokeKind::Inside);
+            if ui.input(|i| i.pointer.any_released()) {
+                if let Some(paths) = app.ui.project_browser.dragging_projects.take() {
+                    for path in paths {
+                        app.ui.project_browser.project_folders.insert(path, f.clone());
+                    }
+                    save_persisted_manager(app);
+                }
+            }
+        } else if is_sel {
             p.rect_filled(f_r, 4.0, Color32::from_rgb(34, 45, 60));
         } else if f_resp.hovered() {
             p.rect_filled(f_r, 4.0, t.hover);
@@ -791,7 +852,7 @@ fn render_grid_view(app: &mut FilmcraftApp, ui: &mut Ui, projects: &[ProjectCard
 
             for prj in projects {
                 let is_selected = app.ui.project_browser.is_selected(&prj.path);
-                let (rect, resp) = ui.allocate_exact_size(vec2(card_w, card_h), Sense::click());
+                let (rect, resp) = ui.allocate_exact_size(vec2(card_w, card_h), Sense::click_and_drag());
                 let p = ui.painter().clone();
 
                 let is_hovered = resp.hovered();
@@ -866,6 +927,16 @@ fn render_grid_view(app: &mut FilmcraftApp, ui: &mut Ui, projects: &[ProjectCard
                     let p3 = pos2(chk_r.max.x - 4.5, chk_r.min.y + 5.0);
                     p.line_segment([p1, p2], Stroke::new(2.0, Color32::WHITE));
                     p.line_segment([p2, p3], Stroke::new(2.0, Color32::WHITE));
+                }
+
+                // Drag to folder
+                if resp.drag_started() {
+                    if is_selected {
+                        app.ui.project_browser.dragging_projects = Some(app.ui.project_browser.get_all_selected());
+                    } else {
+                        app.ui.project_browser.select_single(prj.path.clone());
+                        app.ui.project_browser.dragging_projects = Some(vec![prj.path.clone()]);
+                    }
                 }
 
                 // Click and Multi-Selection
@@ -1080,7 +1151,7 @@ fn render_list_view(app: &mut FilmcraftApp, ui: &mut Ui, projects: &[ProjectCard
 
     for (i, prj) in projects.iter().enumerate() {
         let is_selected = app.ui.project_browser.is_selected(&prj.path);
-        let (row_r, resp) = ui.allocate_exact_size(vec2(avail_w, row_h), Sense::click());
+        let (row_r, resp) = ui.allocate_exact_size(vec2(avail_w, row_h), Sense::click_and_drag());
         let is_hovered = resp.hovered();
 
         let bg = if is_selected {
@@ -1114,6 +1185,16 @@ fn render_list_view(app: &mut FilmcraftApp, ui: &mut Ui, projects: &[ProjectCard
         rx += col_size_w;
 
         p.text(pos2(rx, row_r.center().y), Align2::LEFT_CENTER, &prj.path, Tokens::ui(10.0), Color32::from_rgb(100, 110, 125));
+
+        // Drag to folder
+        if resp.drag_started() {
+            if is_selected {
+                app.ui.project_browser.dragging_projects = Some(app.ui.project_browser.get_all_selected());
+            } else {
+                app.ui.project_browser.select_single(prj.path.clone());
+                app.ui.project_browser.dragging_projects = Some(vec![prj.path.clone()]);
+            }
+        }
 
         // Click and Multi-Selection
         if resp.clicked() {
