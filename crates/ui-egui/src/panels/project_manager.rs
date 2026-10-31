@@ -53,6 +53,8 @@ pub struct ProjectManagerUi {
     pub modal_input: String,
     pub folders: Vec<String>,
     pub project_folders: HashMap<String, String>,
+    #[serde(default)]
+    pub hide_demo: bool,
     #[serde(skip)]
     pub dragging_projects: Option<Vec<String>>,
     #[serde(skip)]
@@ -78,6 +80,7 @@ impl Default for ProjectManagerUi {
             modal_input: String::new(),
             folders: vec!["YouTube".into(), "Clientes".into(), "Pruebas".into()],
             project_folders: HashMap::new(),
+            hide_demo: false,
             dragging_projects: None,
             history_back: Vec::new(),
             history_forward: Vec::new(),
@@ -262,7 +265,38 @@ fn load_persisted_manager(app: &mut FilmcraftApp) {
             app.ui.project_browser.project_folders = saved.project_folders;
             app.ui.project_browser.view_mode = saved.view_mode;
             app.ui.project_browser.card_size = saved.card_size;
+            app.ui.project_browser.hide_demo = saved.hide_demo;
         }
+    }
+}
+
+fn delete_project_entry(path_str: &str, app: &mut FilmcraftApp) {
+    if path_str == "builtin:demo" {
+        app.ui.project_browser.hide_demo = true;
+    } else if path_str == "[En memoria]" {
+        app.session.project = filmcraft_project::Project::new("Sin título").into();
+    } else {
+        let path = Path::new(path_str);
+        if path.exists() && path.is_file() {
+            let _ = fs::remove_file(path);
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if let Some(parent) = path.parent() {
+                let bak = parent.join(format!("{stem}.fcproj.bak"));
+                if bak.exists() {
+                    let _ = fs::remove_file(bak);
+                }
+            }
+        }
+        if app.session.path.as_deref() == Some(path_str) {
+            app.session.path = None;
+        }
+    }
+
+    app.session.prefs.general.recent_projects.retain(|p| p != path_str);
+    app.ui.project_browser.project_folders.remove(path_str);
+    app.ui.project_browser.selected_paths.remove(path_str);
+    if app.ui.project_browser.selected_path.as_deref() == Some(path_str) {
+        app.ui.project_browser.selected_path = None;
     }
 }
 
@@ -295,10 +329,21 @@ pub fn discover_projects(app: &FilmcraftApp) -> Vec<ProjectCard> {
                 let path = entry.path();
                 if path.is_dir() {
                     let folder_name = entry.file_name().to_string_lossy().to_string();
+                    if folder_name == "Auto-Save"
+                        || folder_name == "FilmCraft Previews"
+                        || folder_name == "audio_peaks"
+                        || folder_name.starts_with('.')
+                    {
+                        continue;
+                    }
                     if let Ok(sub_entries) = fs::read_dir(&path) {
                         for sub in sub_entries.flatten() {
                             let sub_path = sub.path();
                             if sub_path.extension().is_some_and(|e| e == "fcproj") {
+                                let fname = sub_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                                if fname.contains(".backup") || fname.ends_with(".bak") {
+                                    continue;
+                                }
                                 let path_str = sub_path.to_string_lossy().to_string();
                                 seen_paths.insert(path_str.clone());
                                 let name = sub_path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
@@ -319,6 +364,10 @@ pub fn discover_projects(app: &FilmcraftApp) -> Vec<ProjectCard> {
                         }
                     }
                 } else if path.extension().is_some_and(|e| e == "fcproj") {
+                    let fname = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    if fname.contains(".backup") || fname.ends_with(".bak") {
+                        continue;
+                    }
                     let path_str = path.to_string_lossy().to_string();
                     seen_paths.insert(path_str.clone());
                     let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
@@ -348,6 +397,10 @@ pub fn discover_projects(app: &FilmcraftApp) -> Vec<ProjectCard> {
         }
         let path = Path::new(p_str);
         if path.exists() {
+            let fname = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            if fname.contains(".backup") || fname.ends_with(".bak") {
+                continue;
+            }
             seen_paths.insert(p_str.clone());
             let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| p_str.clone());
             let meta = fs::metadata(path).ok();
@@ -381,15 +434,17 @@ pub fn discover_projects(app: &FilmcraftApp) -> Vec<ProjectCard> {
     }
 
     // Demo Project Card
-    projects.push(ProjectCard {
-        name: "Proyecto Demo (Desert Dunes)".into(),
-        path: "builtin:demo".into(),
-        modified: SystemTime::now(),
-        size_bytes: 1024 * 1024 * 45,
-        folder: None,
-        is_current: false,
-        is_demo: true,
-    });
+    if !app.ui.project_browser.hide_demo {
+        projects.push(ProjectCard {
+            name: "Proyecto Demo (Desert Dunes)".into(),
+            path: "builtin:demo".into(),
+            modified: SystemTime::now(),
+            size_bytes: 1024 * 1024 * 45,
+            folder: None,
+            is_current: false,
+            is_demo: true,
+        });
+    }
 
     projects
 }
@@ -912,21 +967,15 @@ fn render_content(
             .layout(egui::Layout::top_down(egui::Align::Min)),
     );
 
-    // Shortcut: Delete removes all selected projects from recent list
+    // Shortcut: Delete removes all selected projects from recent list and disk
     let no_modals = !app.ui.project_browser.new_project_modal
         && !app.ui.project_browser.new_folder_modal
         && app.ui.project_browser.rename_modal.is_none();
     if no_modals && ui.input(|i| i.key_pressed(egui::Key::Delete)) {
         let all_sel = app.ui.project_browser.get_all_selected();
         if !all_sel.is_empty() {
-            let set: HashSet<String> = all_sel.into_iter().collect();
-            app.session.prefs.general.recent_projects.retain(|p| !set.contains(p));
-            for p in &set {
-                app.ui.project_browser.project_folders.remove(p);
-                app.ui.project_browser.selected_paths.remove(p);
-            }
-            if let Some(sp) = &app.ui.project_browser.selected_path && set.contains(sp) {
-                app.ui.project_browser.selected_path = None;
+            for p_str in &all_sel {
+                delete_project_entry(p_str, app);
             }
             save_persisted_manager(app);
         }
@@ -1258,7 +1307,7 @@ fn render_grid_view(
                             ui.close();
                         }
                         ui.separator();
-                        if ui.button(format!("Eliminar {sel_count} proyectos de la lista")).clicked() {
+                        if ui.button(format!("Eliminar {sel_count} proyectos")).clicked() {
                             projects_to_delete = Some(all_selected.clone());
                             ui.close();
                         }
@@ -1297,7 +1346,7 @@ fn render_grid_view(
                                 }
                             }
                             ui.separator();
-                            if ui.button("Eliminar de la lista").clicked() {
+                            if ui.button("Eliminar proyecto").clicked() {
                                 projects_to_delete = Some(vec![path_clone.clone()]);
                                 ui.close();
                             }
@@ -1336,14 +1385,8 @@ fn render_grid_view(
                 save_persisted_manager(app);
             }
             if let Some(paths) = projects_to_delete {
-                let set: HashSet<String> = paths.into_iter().collect();
-                app.session.prefs.general.recent_projects.retain(|p| !set.contains(p));
-                for p in &set {
-                    app.ui.project_browser.project_folders.remove(p);
-                    app.ui.project_browser.selected_paths.remove(p);
-                }
-                if let Some(sp) = &app.ui.project_browser.selected_path && set.contains(sp) {
-                    app.ui.project_browser.selected_path = None;
+                for p_str in &paths {
+                    delete_project_entry(p_str, app);
                 }
                 save_persisted_manager(app);
             }
@@ -1661,7 +1704,7 @@ fn render_list_view(
                     ui.close();
                 }
                 ui.separator();
-                if ui.button(format!("Eliminar {sel_count} proyectos de la lista")).clicked() {
+                if ui.button(format!("Eliminar {sel_count} proyectos")).clicked() {
                     projects_to_delete = Some(all_selected.clone());
                     ui.close();
                 }
@@ -1700,7 +1743,7 @@ fn render_list_view(
                         }
                     }
                     ui.separator();
-                    if ui.button("Eliminar de la lista").clicked() {
+                    if ui.button("Eliminar proyecto").clicked() {
                         projects_to_delete = Some(vec![path_clone.clone()]);
                         ui.close();
                     }
@@ -1732,14 +1775,8 @@ fn render_list_view(
         save_persisted_manager(app);
     }
     if let Some(paths) = projects_to_delete {
-        let set: HashSet<String> = paths.into_iter().collect();
-        app.session.prefs.general.recent_projects.retain(|p| !set.contains(p));
-        for p in &set {
-            app.ui.project_browser.project_folders.remove(p);
-            app.ui.project_browser.selected_paths.remove(p);
-        }
-        if let Some(sp) = &app.ui.project_browser.selected_path && set.contains(sp) {
-            app.ui.project_browser.selected_path = None;
+        for p_str in &paths {
+            delete_project_entry(p_str, app);
         }
         save_persisted_manager(app);
     }
