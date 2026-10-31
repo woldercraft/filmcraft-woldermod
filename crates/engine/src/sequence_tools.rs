@@ -1178,6 +1178,7 @@ fn filter_colors(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"hidden": s.state.hidden_marker_colors.iter().map(|c| c.name()).collect::<Vec<_>>()}))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn detect_silence_ranges(
     s: &Session,
     id: ItemId,

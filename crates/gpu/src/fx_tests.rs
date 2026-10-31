@@ -303,6 +303,43 @@ fn cases() -> Vec<(&'static str, Vec<(&'static str, ParamValue)>, bool)> {
             ],
             false,
         ),
+        (
+            "lumetri",
+            vec![
+                ("temperature", fl(10.0)),
+                ("wheel_shadows", pt(0.3, -0.2)),
+                ("wheel_midtones_l", fl(15.0)),
+                ("wheel_highlights", pt(-0.2, 0.3)),
+                ("wheel_highlights_l", fl(-10.0)),
+            ],
+            true,
+        ),
+        (
+            "lumetri",
+            vec![
+                ("look", ch(1)),
+                ("look_intensity", fl(80.0)),
+            ],
+            true,
+        ),
+        (
+            "lumetri",
+            vec![
+                ("sharpen", fl(40.0)),
+            ],
+            true,
+        ),
+        (
+            "lumetri",
+            vec![
+                ("temperature", fl(10.0)),
+                ("look", ch(1)),
+                ("look_intensity", fl(100.0)),
+                ("wheel_shadows", pt(0.2, -0.1)),
+                ("sharpen", fl(30.0)),
+            ],
+            true,
+        ),
     ]
 }
 
@@ -521,10 +558,10 @@ fn lumetri_unsupported_sections_fall_back() {
     let op = FxOp::eval(&e, &cx(Tick::ZERO, 1.0), w, h);
     assert!(op.as_ref().is_some_and(|o| !o.gpu_ok()), "sharpen > 0 and input_lut must fall back to CPU");
 
-    // sharpen alone
+    // sharpen alone (GPU supported)
     let e = effect("lumetri", &[("sharpen", fl(20.0))]);
     let op = FxOp::eval(&e, &cx(Tick::ZERO, 1.0), w, h);
-    assert!(op.as_ref().is_some_and(|o| !o.gpu_ok()));
+    assert!(op.as_ref().is_some_and(FxOp::gpu_ok));
 
     // input_lut alone
     let e = effect("lumetri", &[("input_lut", ParamValue::Text("test.cube".into()))]);
@@ -536,8 +573,13 @@ fn lumetri_unsupported_sections_fall_back() {
     let op = FxOp::eval(&e, &cx(Tick::ZERO, 1.0), w, h);
     assert!(op.as_ref().is_some_and(|o| !o.gpu_ok()));
 
-    // look > 0
+    // look 1..=8 (GPU supported)
     let e = effect("lumetri", &[("look", ch(1))]);
+    let op = FxOp::eval(&e, &cx(Tick::ZERO, 1.0), w, h);
+    assert!(op.as_ref().is_some_and(FxOp::gpu_ok));
+
+    // look > 8 (falls back to CPU)
+    let e = effect("lumetri", &[("look", ch(9))]);
     let op = FxOp::eval(&e, &cx(Tick::ZERO, 1.0), w, h);
     assert!(op.as_ref().is_some_and(|o| !o.gpu_ok()));
 
@@ -551,15 +593,15 @@ fn lumetri_unsupported_sections_fall_back() {
     let op = FxOp::eval(&e, &cx(Tick::ZERO, 1.0), w, h);
     assert!(op.as_ref().is_some_and(|o| !o.gpu_ok()));
 
-    // wheel offset
+    // wheel offset (GPU supported)
     let e = effect("lumetri", &[("wheel_shadows", pt(0.5, 0.0))]);
     let op = FxOp::eval(&e, &cx(Tick::ZERO, 1.0), w, h);
-    assert!(op.as_ref().is_some_and(|o| !o.gpu_ok()));
+    assert!(op.as_ref().is_some_and(FxOp::gpu_ok));
 
-    // wheel lightness
+    // wheel lightness (GPU supported)
     let e = effect("lumetri", &[("wheel_midtones_l", fl(20.0))]);
     let op = FxOp::eval(&e, &cx(Tick::ZERO, 1.0), w, h);
-    assert!(op.as_ref().is_some_and(|o| !o.gpu_ok()));
+    assert!(op.as_ref().is_some_and(FxOp::gpu_ok));
 
     // HSL secondary on
     let e = effect("lumetri", &[("hsl_on", ParamValue::Bool(true))]);

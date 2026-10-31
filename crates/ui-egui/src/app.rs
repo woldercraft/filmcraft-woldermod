@@ -265,6 +265,74 @@ impl FilmcraftApp {
         updates_ui::tick(self, ctx);
         #[cfg(not(target_arch = "wasm32"))]
         self.tick_media_refresh(ctx, now);
+        self.check_memory_guard(now);
+    }
+
+    /// Monitor memory pressure (Linux `/proc/meminfo`) and periodically clean idle buffers.
+    fn check_memory_guard(&mut self, now: f64) {
+        #[cfg(target_os = "linux")]
+        {
+            static LAST_CHECK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let half_sec = (now * 2.0) as u64;
+            let last = LAST_CHECK.load(std::sync::atomic::Ordering::Relaxed);
+            if half_sec > last {
+                LAST_CHECK.store(half_sec, std::sync::atomic::Ordering::Relaxed);
+                if let Ok(content) = std::fs::read_to_string("/proc/meminfo") {
+                    let mut mem_total = 0u64;
+                    let mut mem_available = 0u64;
+                    for line in content.lines() {
+                        if let Some(rest) = line.strip_prefix("MemTotal:") {
+                            if let Ok(kb) = rest.trim().trim_end_matches("kB").trim().parse::<u64>() {
+                                mem_total = kb;
+                            }
+                        } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
+                            if let Ok(kb) = rest.trim().trim_end_matches("kB").trim().parse::<u64>() {
+                                mem_available = kb;
+                            }
+                        }
+                        if mem_total > 0 && mem_available > 0 {
+                            break;
+                        }
+                    }
+                    if mem_total > 0 && mem_available > 0 {
+                        let used_pct = (mem_total.saturating_sub(mem_available) * 100) / mem_total;
+                        if used_pct >= 90 || mem_available < 1_500_000 {
+                            self.frames.emergency_trim();
+                            if let Some(gpu) = &mut self.gpu {
+                                gpu.compositor.trim_all_uploads();
+                            }
+                            if self.textures.len() > 16 {
+                                self.textures.retain(|k, _| !k.starts_with("thumb-"));
+                                self.thumb_used.clear();
+                            }
+                            if let Some(trim) = &self.hooks.trim_heap {
+                                trim();
+                            }
+                            self.ui.status = tl!("System memory is low: caches trimmed to prevent out-of-memory").into();
+                        } else if used_pct >= 80 || mem_available < 2_500_000 {
+                            filmcraft_engine::trim_idle();
+                            filmcraft_frame::pool::trim_planes();
+                            if let Some(trim) = &self.hooks.trim_heap {
+                                trim();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !self.playback.playing {
+            static LAST_IDLE_TRIM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let sec = now as u64;
+            let last = LAST_IDLE_TRIM.load(std::sync::atomic::Ordering::Relaxed);
+            if sec >= last + 5 {
+                LAST_IDLE_TRIM.store(sec, std::sync::atomic::Ordering::Relaxed);
+                filmcraft_frame::pool::trim_f32();
+                filmcraft_engine::trim_idle();
+                if let Some(trim) = &self.hooks.trim_heap {
+                    trim();
+                }
+            }
+        }
     }
 
     /// Apply engine events that change the active sequence/view, IME target, toast or project.

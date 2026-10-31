@@ -572,7 +572,7 @@ fn gpu_compositor_sequence_plan_with_adjustment_layer_blurs() {
     let mut map = SourceMap::default();
     let g = GeneratorSource::new(Generator::ColorMatte { color: [1.0, 0.0, 0.0, 1.0] }, w, h, FrameRate::FPS_24, Tick(10 * TICKS_PER_SECOND));
     let info = g.info().clone();
-    let matte = p.add_item("m", filmcraft_project::Label::Iris, filmcraft_project::ItemKind::Media(filmcraft_project::MediaClip {
+    let matte = p.add_item("m", filmcraft_project::Label::Iris, filmcraft_project::ItemKind::Media(Box::new(filmcraft_project::MediaClip {
         media: filmcraft_project::MediaRef::Generator(g.generator.clone()),
         info,
         interpret: Default::default(),
@@ -582,7 +582,7 @@ fn gpu_compositor_sequence_plan_with_adjustment_layer_blurs() {
         offline: false,
         proxy: None,
         identity: None,
-    }), None);
+    })), None);
     map.0.insert(matte, std::sync::Arc::new(g) as SharedSource);
     let ti1 = p.make_track_item(matte, filmcraft_project::TrackKind::Video, Tick::ZERO, filmcraft_time::TimeRange::new(Tick::ZERO, FrameRate::FPS_24.tick_of(48)), FrameRate::FPS_24).unwrap();
     p.sequence_mut(seq).unwrap().video_tracks[0].items.push(ti1);

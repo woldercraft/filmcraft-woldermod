@@ -357,6 +357,7 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
                 .pick_file()
                 .map(|p| p.to_string_lossy().to_string())
         }));
+        app.hooks.trim_heap = Some(Box::new(filmcraft_platform::trim_process_heap));
         #[cfg(target_os = "macos")]
         {
             let (rx, update) = native_menu::install(&app, cc.egui_ctx.clone());

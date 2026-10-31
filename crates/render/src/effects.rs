@@ -1435,6 +1435,14 @@ mod lumetri_cpu_parity_tests {
         ParamValue::Color([r, g, b, 1.0])
     }
 
+    fn pt(x: f64, y: f64) -> ParamValue {
+        ParamValue::Vec2(filmcraft_geom::Vec2::new(x, y))
+    }
+
+    fn ch(v: u32) -> ParamValue {
+        ParamValue::Choice(v)
+    }
+
     #[test]
     fn lumetri_gpu_op_matches_original_fn_lumetri_cpu() {
         let cases: &[(&str, Vec<(&str, ParamValue)>)] = &[
@@ -1520,6 +1528,66 @@ mod lumetri_cpu_parity_tests {
                     ("tint", fl(-100.0)),
                     ("whites", fl(-100.0)),
                     ("blacks", fl(-100.0)),
+                ],
+            ),
+            (
+                "wheels_offset",
+                vec![
+                    ("wheel_shadows", pt(0.3, -0.2)),
+                    ("wheel_highlights", pt(-0.2, 0.3)),
+                ],
+            ),
+            (
+                "wheels_lightness",
+                vec![
+                    ("wheel_shadows_l", fl(-15.0)),
+                    ("wheel_midtones_l", fl(20.0)),
+                    ("wheel_highlights_l", fl(10.0)),
+                ],
+            ),
+            (
+                "basic_and_wheels",
+                vec![
+                    ("temperature", fl(15.0)),
+                    ("exposure", fl(0.2)),
+                    ("contrast", fl(10.0)),
+                    ("wheel_shadows", pt(0.2, -0.1)),
+                    ("wheel_midtones_l", fl(10.0)),
+                    ("wheel_highlights", pt(-0.1, 0.2)),
+                    ("wheel_highlights_l", fl(-5.0)),
+                ],
+            ),
+            (
+                "look_1_teal_orange",
+                vec![
+                    ("look", ch(1)),
+                    ("look_intensity", fl(80.0)),
+                ],
+            ),
+            (
+                "look_3_and_wheels",
+                vec![
+                    ("look", ch(3)),
+                    ("look_intensity", fl(100.0)),
+                    ("wheel_shadows", pt(0.1, -0.2)),
+                ],
+            ),
+            (
+                "sharpen_alone",
+                vec![
+                    ("sharpen", fl(40.0)),
+                ],
+            ),
+            (
+                "all_together",
+                vec![
+                    ("temperature", fl(12.0)),
+                    ("exposure", fl(0.1)),
+                    ("look", ch(1)),
+                    ("look_intensity", fl(75.0)),
+                    ("wheel_shadows", pt(0.1, -0.1)),
+                    ("wheel_midtones_l", fl(5.0)),
+                    ("sharpen", fl(35.0)),
                 ],
             ),
         ];

@@ -52,6 +52,8 @@ const OP_MIRROR: u32 = 28;
 const OP_OFFSET: u32 = 29;
 const OP_VIDEO_LIMITER: u32 = 30;
 const OP_LUMETRI: u32 = 31;
+const OP_COLOR_WHEELS: u32 = 32;
+const OP_LUMETRI_LOOK: u32 = 33;
 
 type Target = (wgpu::Texture, wgpu::TextureView);
 
@@ -206,6 +208,18 @@ fn steps(op: &FxOp) -> Vec<Step> {
             vround,
             vfeather,
             aspect,
+            look,
+            look_k,
+            sharpen,
+            sharpen_rx,
+            sharpen_ry,
+            wheels_on,
+            ws,
+            wm,
+            wh_rgb,
+            ls,
+            lm,
+            lh,
             ..
         } => {
             let ge = [gains[0] * exposure, gains[1] * exposure, gains[2] * exposure];
@@ -244,6 +258,39 @@ fn steps(op: &FxOp) -> Vec<Step> {
                 0.0,
             ];
             out.push(step(OP_LUMETRI, [*creative_on as u32, *vignette_on as u32, 0, 0], &p));
+
+            if *look > 0 && *look <= 8 && look_k.abs() > 1e-5 {
+                out.push(step(OP_LUMETRI_LOOK, [*look, 0, 0, 0], &[*look_k]));
+            }
+
+            let wheels_active = *wheels_on
+                && (ws.iter().chain(wm).chain(wh_rgb).any(|v| v.abs() > 1e-5) || (ls.abs() + lm.abs() + lh.abs() > 1e-5));
+            if wheels_active {
+                let lift_k = [ws[0] * 0.3 + ls * 0.3, ws[1] * 0.3 + ls * 0.3, ws[2] * 0.3 + ls * 0.3];
+                let gamma_k = [wm[0] * 0.3 + lm * 0.3, wm[1] * 0.3 + lm * 0.3, wm[2] * 0.3 + lm * 0.3];
+                let gain_k = [wh_rgb[0] * 0.5 + lh * 0.5, wh_rgb[1] * 0.5 + lh * 0.5, wh_rgb[2] * 0.5 + lh * 0.5];
+                let wheels_p = [
+                    lift_k[0], lift_k[1], lift_k[2], 0.0,
+                    gamma_k[0], gamma_k[1], gamma_k[2], 0.0,
+                    gain_k[0], gain_k[1], gain_k[2], 0.0,
+                    0.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0,
+                ];
+                out.push(step(OP_COLOR_WHEELS, [0; 4], &wheels_p));
+            }
+
+            if sharpen.abs() > 1e-3 && !sharpen_rx.is_empty() {
+                let start = out.len();
+                boxes(sharpen_rx, false, true, &mut out);
+                boxes(sharpen_ry, true, true, &mut out);
+                for s in &mut out[start..] {
+                    s.unsharp_blur = true;
+                }
+                let mut s = step(OP_UNSHARP, [0; 4], &[sharpen.max(-1.0), 0.0]);
+                s.combine = true;
+                out.push(s);
+            }
         }
     }
     out

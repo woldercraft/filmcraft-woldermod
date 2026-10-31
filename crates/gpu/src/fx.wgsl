@@ -50,6 +50,8 @@ const OP_MIRROR: u32 = 28u;
 const OP_OFFSET: u32 = 29u;
 const OP_VIDEO_LIMITER: u32 = 30u;
 const OP_LUMETRI: u32 = 31u;
+const OP_COLOR_WHEELS: u32 = 32u;
+const OP_LUMETRI_LOOK: u32 = 33u;
 
 fn size() -> vec2<i32> {
     return vec2<i32>(i32(u.i0.y), i32(u.i0.z));
@@ -530,6 +532,88 @@ fn lumetri_op(c: vec3<f32>, p: vec2<i32>) -> vec3<f32> {
     return dec(v);
 }
 
+fn color_wheels_op(c: vec3<f32>) -> vec3<f32> {
+    var v = enc(c);
+    let lift_k = u.p0.xyz;
+    let gamma_k = u.p1.xyz;
+    let gain_k = u.p2.xyz;
+
+    let l = clamp(0.2126 * v.x + 0.7152 * v.y + 0.0722 * v.z, 0.0, 1.0);
+    let wsh = (1.0 - l) * (1.0 - l);
+    let whi = l * l;
+    let wmid = max(1.0 - wsh - whi, 0.0);
+
+    v += lift_k * wsh;
+    v += gamma_k * wmid;
+    v *= vec3(1.0) + gain_k * whi;
+
+    return dec(v);
+}
+
+fn s_curve_wgsl(v: f32, k: f32) -> f32 {
+    let x = clamp(v, 0.0, 1.0);
+    return x + (x * x * (3.0 - 2.0 * x) - x) * k;
+}
+
+fn s_curve3_wgsl(c: vec3<f32>, k: f32) -> vec3<f32> {
+    return vec3<f32>(
+        s_curve_wgsl(c.x, k),
+        s_curve_wgsl(c.y, k),
+        s_curve_wgsl(c.z, k),
+    );
+}
+
+fn apply_look_wgsl(look: u32, c: vec3<f32>) -> vec3<f32> {
+    let l = 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z;
+    switch look {
+        case 1u: {
+            let shadow = vec3<f32>(0.0, 0.08, 0.1);
+            let high = vec3<f32>(0.1, 0.04, -0.06);
+            let col = c + shadow * (1.0 - l) + high * l;
+            return s_curve3_wgsl(col, 0.35);
+        }
+        case 2u: {
+            let col = vec3<f32>(c.x * 1.06 + 0.02, c.y * 1.0 + 0.01, c.z * 0.9);
+            return mix(col, vec3<f32>(l), 0.15) * 0.94 + vec3<f32>(0.04);
+        }
+        case 3u: {
+            let col = vec3<f32>(c.x * 0.9, c.y * 0.98, c.z * 1.1 + 0.02);
+            return s_curve3_wgsl(col, 0.2);
+        }
+        case 4u: {
+            let col = mix(c, vec3<f32>(l), 0.55);
+            return s_curve3_wgsl(col, 0.6);
+        }
+        case 5u: {
+            let col = mix(c, vec3<f32>(l), 0.25);
+            return vec3<f32>(0.08) + col * 0.84;
+        }
+        case 6u: {
+            return s_curve3_wgsl(vec3<f32>(l), 0.3);
+        }
+        case 7u: {
+            let col = vec3<f32>(c.x * 1.1 + 0.03, c.y * 1.02 + 0.01, c.z * 0.82);
+            return s_curve3_wgsl(col, 0.15);
+        }
+        case 8u: {
+            let col = vec3<f32>(c.x * 0.75, c.y * 0.85, c.z * 1.15);
+            return col * 0.8;
+        }
+        default: {
+            return c;
+        }
+    }
+}
+
+fn lumetri_look_op(c: vec3<f32>) -> vec3<f32> {
+    var v = enc(c);
+    let look = u.i1.x;
+    let look_k = u.p0.x;
+    let lk = apply_look_wgsl(look, v);
+    v = v + (lk - v) * look_k;
+    return dec(v);
+}
+
 // One output pixel of every op but the running-sum box blur.
 fn pixel(op: u32, p: vec2<i32>) -> vec4<f32> {
     let s = size();
@@ -713,6 +797,26 @@ fn pixel(op: u32, p: vec2<i32>) -> vec4<f32> {
             }
             let c = o.rgb / a;
             let res = lumetri_op(c, p);
+            return vec4(res * a, a);
+        }
+        case OP_COLOR_WHEELS: {
+            let o = ld(p);
+            let a = o.a;
+            if a <= 1e-6 {
+                return o;
+            }
+            let c = o.rgb / a;
+            let res = color_wheels_op(c);
+            return vec4(res * a, a);
+        }
+        case OP_LUMETRI_LOOK: {
+            let o = ld(p);
+            let a = o.a;
+            if a <= 1e-6 {
+                return o;
+            }
+            let c = o.rgb / a;
+            let res = lumetri_look_op(c);
             return vec4(res * a, a);
         }
         default: {

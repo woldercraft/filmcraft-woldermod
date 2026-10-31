@@ -270,3 +270,20 @@ pub fn nvdec_factory(entry: &filmcraft_isobmff::SampleEntry) -> Option<filmcraft
         }
     }
 }
+
+/// Release freed heap memory back to the operating system (Linux glibc `malloc_trim`).
+#[allow(unsafe_code)]
+pub fn trim_process_heap() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        unsafe extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        // SAFETY: `malloc_trim` is a standard GNU libc function that releases free heap pages
+        // back to the OS via sbrk/madvise. It accepts a pad parameter (0 = release as much as
+        // possible) and returns an int. It is thread-safe and safe to call at any time.
+        unsafe {
+            malloc_trim(0);
+        }
+    }
+}

@@ -5,7 +5,7 @@ const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789a
 fn run(input: &[u8]) -> (Vec<Value>, Vec<String>) {
     let mut out = Vec::new();
     let mut calls = Vec::new();
-    serve_lines(input, &mut out, TOKEN, |m, _p| {
+    serve_lines(input, &mut out, Some(TOKEN), |m, _p| {
         calls.push(m);
         Some(json!({"ok": true, "result": null}))
     });
@@ -90,7 +90,7 @@ fn tcp_connection_is_closed_after_junk() {
     let server = std::thread::spawn(move || {
         let (s, _) = listener.accept().unwrap();
         let read = s.try_clone().unwrap();
-        serve_lines(read, s, TOKEN, |_, _| Some(json!({"ok": true})));
+        serve_lines(read, s, Some(TOKEN), |_, _| Some(json!({"ok": true})));
     });
     let mut c = TcpStream::connect(addr).unwrap();
     c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -109,7 +109,7 @@ fn extra_connections_are_refused() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let addr = listener.local_addr().unwrap();
     let (tx, _rx) = channel::<ControlRequest>();
-    std::thread::spawn(move || accept_loop(listener, tx, egui::Context::default(), TOKEN.into()));
+    std::thread::spawn(move || accept_loop(listener, tx, egui::Context::default(), Some(TOKEN.into())));
     // Idle connections are accepted in order and held open.
     let held: Vec<TcpStream> = (0..16).map(|_| TcpStream::connect(addr).unwrap()).collect();
     let mut extra = TcpStream::connect(addr).unwrap();
@@ -132,7 +132,7 @@ fn timed_out_connection_releases_slot(partial: &[u8]) {
         let (stream, _) = listener.accept().unwrap();
         {
             let _slot = Slot(counted);
-            serve_with_timeout(stream, &tx, &egui::Context::default(), TOKEN, Duration::from_millis(100)).unwrap();
+            serve_with_timeout(stream, &tx, &egui::Context::default(), Some(TOKEN), Duration::from_millis(100)).unwrap();
         }
         done.send(()).unwrap();
     });
@@ -182,7 +182,7 @@ fn idle_timeout_does_not_cancel_a_pending_ui_reply() {
     let (tx, rx) = channel::<ControlRequest>();
     let server = std::thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
-        serve_with_timeout(stream, &tx, &egui::Context::default(), TOKEN, Duration::from_millis(100)).unwrap();
+        serve_with_timeout(stream, &tx, &egui::Context::default(), Some(TOKEN), Duration::from_millis(100)).unwrap();
     });
     let mut client = TcpStream::connect(addr).unwrap();
     client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -212,7 +212,7 @@ fn active_connection_can_be_reused() {
     let (tx, rx) = channel::<ControlRequest>();
     let server = std::thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
-        serve_with_timeout(stream, &tx, &egui::Context::default(), TOKEN, Duration::from_secs(5)).unwrap();
+        serve_with_timeout(stream, &tx, &egui::Context::default(), Some(TOKEN), Duration::from_secs(5)).unwrap();
     });
     let mut client = TcpStream::connect(addr).unwrap();
     client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -274,7 +274,7 @@ fn tcp_authentication_happens_before_enqueueing() {
     let (tx, rx) = channel::<ControlRequest>();
     let server = std::thread::spawn(move || {
         let (s, _) = listener.accept().unwrap();
-        serve(s, &tx, &egui::Context::default(), TOKEN);
+        serve(s, &tx, &egui::Context::default(), Some(TOKEN));
     });
     let mut c = TcpStream::connect(addr).unwrap();
     c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -294,7 +294,7 @@ fn authenticated_tcp_request_reaches_the_ui_queue() {
     let (tx, rx) = channel::<ControlRequest>();
     let server = std::thread::spawn(move || {
         let (s, _) = listener.accept().unwrap();
-        serve(s, &tx, &egui::Context::default(), TOKEN);
+        serve(s, &tx, &egui::Context::default(), Some(TOKEN));
     });
     let params = json!({"command": "file.saveAs", "params": {"path": "/owner/project.fcproj"}});
     let mut c = TcpStream::connect(addr).unwrap();
@@ -309,4 +309,19 @@ fn authenticated_tcp_request_reaches_the_ui_queue() {
     c.read_to_string(&mut reply).unwrap();
     server.join().unwrap();
     assert_eq!(serde_json::from_str::<Value>(&reply).unwrap(), json!({"id": 7, "ok": true}));
+}
+
+#[test]
+fn insecure_mode_accepts_requests_without_token() {
+    let mut out = Vec::new();
+    let mut calls = Vec::new();
+    let input = b"{\"id\": 1, \"method\": \"engine.execute\", \"params\": {\"command\": \"sequence.play\"}}\n";
+    serve_lines(&input[..], &mut out, None, |m, _p| {
+        calls.push(m);
+        Some(json!({"ok": true}))
+    });
+    assert_eq!(calls, ["engine.execute"]);
+    let reply: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(reply["id"], 1);
+    assert_eq!(reply["ok"], true);
 }

@@ -289,6 +289,9 @@ fn prepare_layers(layers: &[PlanLayer]) -> PreparedPlan {
     PreparedPlan { layers: layers.iter().map(|l| prepare_frame(&l.frame)).collect(), ..Default::default() }
 }
 
+const MAX_SHARED_UPLOADS: usize = 8;
+const MAX_LOCAL_UPLOADS: usize = 6;
+
 impl GpuCompositor {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -623,8 +626,8 @@ impl GpuCompositor {
             let mut shared_up = up.clone();
             shared_up.last_used = guard.0;
             guard.1.insert(key, shared_up);
-            if guard.1.len() > 64 {
-                let remove_n = guard.1.len() - 64;
+            if guard.1.len() > MAX_SHARED_UPLOADS {
+                let remove_n = guard.1.len() - MAX_SHARED_UPLOADS;
                 let mut v: Vec<(u64, (usize, u32, u32))> = guard.1.iter().map(|(k, u)| (u.last_used, *k)).collect();
                 v.sort_unstable();
                 for (_, k) in v.into_iter().take(remove_n) {
@@ -639,12 +642,22 @@ impl GpuCompositor {
 
     fn trim_uploads(&mut self) {
         // keep the most recent uploads (enough for several stacked layers + playback lookahead)
-        if self.uploads.len() > 24 {
+        if self.uploads.len() > MAX_LOCAL_UPLOADS {
             let mut v: Vec<(u64, (usize, u32, u32))> = self.uploads.iter().map(|(k, u)| (u.last_used, *k)).collect();
             v.sort_unstable();
-            for (_, k) in v.into_iter().take(self.uploads.len() - 24) {
+            for (_, k) in v.into_iter().take(self.uploads.len() - MAX_LOCAL_UPLOADS) {
                 self.uploads.remove(&k);
             }
+        }
+    }
+
+    /// Free all cached texture uploads and clear the shared upload table, releasing memory to the OS.
+    pub fn trim_all_uploads(&mut self) {
+        self.uploads.clear();
+        if let Some(shared) = &self.shared_uploads
+            && let Ok(mut guard) = shared.lock()
+        {
+            guard.1.clear();
         }
     }
 

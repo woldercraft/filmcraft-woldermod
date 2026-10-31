@@ -35,9 +35,20 @@ fn start_with_token(port: u16, ctx: egui::Context, token: Option<String>) -> Rec
     let (tx, rx) = channel::<ControlRequest>();
     // An inherited environment variable shares the credential with the owner's bridge process
     // without exposing it in command-line arguments, logs, or a shared discovery file.
-    let Some(token) = token.filter(|t| t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit())) else {
-        eprintln!("filmcraft: control server disabled: FILMCRAFT_CONTROL_TOKEN must contain 64 random hex characters (see docs/control-protocol.md)");
-        return rx;
+    let token = match token {
+        Some(t) if t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit()) => Some(t),
+        Some(_) => {
+            eprintln!("filmcraft: control server disabled: FILMCRAFT_CONTROL_TOKEN must contain 64 random hex characters (see docs/control-protocol.md)");
+            return rx;
+        }
+        None => {
+            if std::env::var_os("FILMCRAFT_CONTROL_INSECURE").is_some() {
+                None
+            } else {
+                eprintln!("filmcraft: control server disabled: FILMCRAFT_CONTROL_TOKEN must contain 64 random hex characters (see docs/control-protocol.md)");
+                return rx;
+            }
+        }
     };
     let listener = match TcpListener::bind(("127.0.0.1", port)) {
         Ok(l) => l,
@@ -51,7 +62,7 @@ fn start_with_token(port: u16, ctx: egui::Context, token: Option<String>) -> Rec
     rx
 }
 
-fn accept_loop(listener: TcpListener, tx: Sender<ControlRequest>, ctx: egui::Context, token: String) {
+fn accept_loop(listener: TcpListener, tx: Sender<ControlRequest>, ctx: egui::Context, token: Option<String>) {
     let open = Arc::new(AtomicUsize::new(0));
     for mut stream in listener.incoming().flatten() {
         if open.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
@@ -67,7 +78,7 @@ fn accept_loop(listener: TcpListener, tx: Sender<ControlRequest>, ctx: egui::Con
         let slot = Slot(Arc::clone(&open));
         let spawned = std::thread::Builder::new().name("control-conn".into()).spawn(move || {
             let _slot = slot;
-            serve(stream, &tx, &ctx, &token);
+            serve(stream, &tx, &ctx, token.as_deref());
         });
         if let Err(e) = spawned {
             eprintln!("filmcraft: control server could not start a connection thread: {e}");
@@ -84,13 +95,13 @@ impl Drop for Slot {
     }
 }
 
-fn serve(stream: TcpStream, tx: &Sender<ControlRequest>, ctx: &egui::Context, token: &str) {
+fn serve(stream: TcpStream, tx: &Sender<ControlRequest>, ctx: &egui::Context, token: Option<&str>) {
     if let Err(e) = serve_with_timeout(stream, tx, ctx, token, CONNECTION_TIMEOUT) {
         eprintln!("filmcraft: could not configure control connection: {e}");
     }
 }
 
-fn serve_with_timeout(stream: TcpStream, tx: &Sender<ControlRequest>, ctx: &egui::Context, token: &str, timeout: Duration) -> std::io::Result<()> {
+fn serve_with_timeout(stream: TcpStream, tx: &Sender<ControlRequest>, ctx: &egui::Context, token: Option<&str>, timeout: Duration) -> std::io::Result<()> {
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
     let read = stream.try_clone()?;
@@ -115,7 +126,7 @@ enum Line {
     Reject(String),
 }
 
-fn parse_line(bytes: &[u8], token: &str) -> Line {
+fn parse_line(bytes: &[u8], token: Option<&str>) -> Line {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return Line::Reject("not a control request (invalid UTF-8); closing the connection".into());
     };
@@ -135,9 +146,11 @@ fn parse_line(bytes: &[u8], token: &str) -> Line {
     };
     // Authenticate every request before constructing or enqueueing a ControlRequest. A valid
     // earlier request must not authorize a later one with a missing or incorrect credential.
-    let authenticated = obj.get("token").and_then(Value::as_str).is_some_and(|supplied| bool::from(supplied.as_bytes().ct_eq(token.as_bytes())));
-    if !authenticated {
-        return Line::Reject("control authentication failed; closing the connection".into());
+    if let Some(token) = token {
+        let authenticated = obj.get("token").and_then(Value::as_str).is_some_and(|supplied| bool::from(supplied.as_bytes().ct_eq(token.as_bytes())));
+        if !authenticated {
+            return Line::Reject("control authentication failed; closing the connection".into());
+        }
     }
     Line::Request { id: obj.get("id").cloned().unwrap_or(Value::Null), method: method.to_string(), params: obj.get("params").cloned().unwrap_or(json!({})) }
 }
@@ -178,7 +191,7 @@ fn read_bounded_line(reader: &mut impl BufRead, buf: &mut Vec<u8>, max: usize) -
 /// Serve requests from `read`, answering on `out`, until the peer closes, sends something that is
 /// not a request, or `handle` returns `None` (app gone). `handle` gets `(method, params)` and
 /// returns the reply object (the request's `id` is added here).
-fn serve_lines<R: Read, W: Write>(read: R, mut out: W, token: &str, mut handle: impl FnMut(String, Value) -> Option<Value>) {
+fn serve_lines<R: Read, W: Write>(read: R, mut out: W, token: Option<&str>, mut handle: impl FnMut(String, Value) -> Option<Value>) {
     let mut reader = BufReader::new(read);
     let mut buf = Vec::new();
     loop {

@@ -331,7 +331,7 @@ pub struct MemoryPrefs {
 
 impl Default for MemoryPrefs {
     fn default() -> Self {
-        Self { ram_reserved_gb: 4, frame_cache_mb: 768 }
+        Self { ram_reserved_gb: 4, frame_cache_mb: 128 }
     }
 }
 

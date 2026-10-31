@@ -1278,7 +1278,9 @@ fn rotary_knob(
     };
     p.text(val_pos, Align2::CENTER_CENTER, val_text, Tokens::ui(9.5), val_color);
 
-    if (new_val - cur_val).abs() > 1e-5 {
+    let threshold = if decimals == 0 { 0.1 } else { 0.01 };
+    let delta = (new_val - cur_val).abs();
+    if (delta >= threshold || resp.drag_stopped() || resp.double_clicked()) && delta > 1e-5 {
         actions.push(json!({"clip": clip.0, "effect": idx, "param": id, "value": new_val}));
     }
 
@@ -1367,7 +1369,10 @@ fn slider(
         crate::widgets::HotNumberOptions::new((soft_max - soft_min) / 300.0, (min, max), decimals as usize, "", t),
     );
     if let Some(nv) = out.or(nv) {
-        actions.push(json!({"clip": clip.0, "effect": idx, "param": id, "value": (nv * 10f64.powi(decimals as i32)).round() / 10f64.powi(decimals as i32)}));
+        let rounded = (nv * 10f64.powi(decimals as i32)).round() / 10f64.powi(decimals as i32);
+        if (rounded - v).abs() > 1e-5 {
+            actions.push(json!({"clip": clip.0, "effect": idx, "param": id, "value": rounded}));
+        }
     }
     row
 }
@@ -1454,8 +1459,11 @@ fn curve_editor(ui: &mut egui::Ui, e: &EffectInstance, id: &str, hue: bool, col:
         && let (Some(i), Some(pos)) = (dragging, resp.interact_pointer_pos())
         && i < new_pts.len()
     {
-        new_pts[i] = from_screen(pos);
-        changed = true;
+        let np = from_screen(pos);
+        if (np[0] - new_pts[i][0]).abs() > 1e-4 || (np[1] - new_pts[i][1]).abs() > 1e-4 {
+            new_pts[i] = np;
+            changed = true;
+        }
     }
     if resp.drag_stopped() {
         dragging = None;
@@ -1522,7 +1530,11 @@ fn color_wheel(ui: &mut egui::Ui, e: &EffectInstance, mt: Tick, id: &str, lid: &
         let d = (pos - c) / (r_in - 4.0);
         let len = d.length().min(1.0);
         let dir = if d.length() > 1e-6 { d / d.length() } else { d };
-        actions.push(json!({"clip": clip.0, "effect": idx, "param": id, "value": [dir.x * len, -dir.y * len]}));
+        let nx = dir.x * len;
+        let ny = -dir.y * len;
+        if (nx - v.x as f32).abs() > 1e-4 || (ny - v.y as f32).abs() > 1e-4 {
+            actions.push(json!({"clip": clip.0, "effect": idx, "param": id, "value": [nx, ny]}));
+        }
     }
     if resp.double_clicked() {
         actions.push(json!({"clip": clip.0, "effect": idx, "param": id, "value": [0.0, 0.0]}));
@@ -1538,7 +1550,9 @@ fn color_wheel(ui: &mut egui::Ui, e: &EffectInstance, mt: Tick, id: &str, lid: &
         && let Some(pos) = lr.interact_pointer_pos()
     {
         let nv = ((track.center().y - pos.y) / (track.height() / 2.0) * 100.0).clamp(-100.0, 100.0);
-        actions.push(json!({"clip": clip.0, "effect": idx, "param": lid, "value": nv}));
+        if (nv - l).abs() > 1e-3 {
+            actions.push(json!({"clip": clip.0, "effect": idx, "param": lid, "value": nv}));
+        }
     }
     let _ = StrokeKind::Inside;
 }
