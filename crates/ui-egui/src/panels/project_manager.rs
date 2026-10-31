@@ -556,10 +556,10 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut Ui, rect: Rect) {
         .filter(|prj| {
             if search_lower.is_empty() {
                 if let Some(ref cf) = current_folder {
-                    if prj.folder.as_ref() != Some(cf) && !prj.is_demo {
+                    if prj.folder.as_ref() != Some(cf) {
                         return false;
                     }
-                } else if prj.folder.is_some() && !prj.is_demo {
+                } else if prj.folder.is_some() {
                     return false;
                 }
             } else if !prj.name.to_lowercase().contains(&search_lower) {
@@ -1345,11 +1345,11 @@ fn render_grid_view(
                                     ui.close();
                                 }
                             }
-                            ui.separator();
-                            if ui.button("Eliminar proyecto").clicked() {
-                                projects_to_delete = Some(vec![path_clone.clone()]);
-                                ui.close();
-                            }
+                        }
+                        ui.separator();
+                        if ui.button("Eliminar proyecto").clicked() {
+                            projects_to_delete = Some(vec![path_clone.clone()]);
+                            ui.close();
                         }
                     }
                 });
@@ -1742,11 +1742,11 @@ fn render_list_view(
                             ui.close();
                         }
                     }
-                    ui.separator();
-                    if ui.button("Eliminar proyecto").clicked() {
-                        projects_to_delete = Some(vec![path_clone.clone()]);
-                        ui.close();
-                    }
+                }
+                ui.separator();
+                if ui.button("Eliminar proyecto").clicked() {
+                    projects_to_delete = Some(vec![path_clone.clone()]);
+                    ui.close();
                 }
             }
         });
