@@ -2,7 +2,7 @@
 //! Allows users to browse, search, organize into folders, create, and manage projects
 //! with cinematic cards, responsive grid/list views, and quick actions upon launching FilmCraft.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -40,6 +40,8 @@ pub enum SortBy {
 pub struct ProjectManagerUi {
     pub search: String,
     pub selected_path: Option<String>,
+    #[serde(default)]
+    pub selected_paths: HashSet<String>,
     pub current_folder: Option<String>,
     pub view_mode: ViewMode,
     pub sort_by: SortBy,
@@ -58,6 +60,7 @@ impl Default for ProjectManagerUi {
         Self {
             search: String::new(),
             selected_path: None,
+            selected_paths: HashSet::new(),
             current_folder: None,
             view_mode: ViewMode::Grid,
             sort_by: SortBy::DateModified,
@@ -70,6 +73,67 @@ impl Default for ProjectManagerUi {
             folders: vec!["YouTube".into(), "Clientes".into(), "Pruebas".into()],
             project_folders: HashMap::new(),
         }
+    }
+}
+impl ProjectManagerUi {
+    pub fn is_selected(&self, path: &str) -> bool {
+        self.selected_paths.contains(path) || self.selected_path.as_deref() == Some(path)
+    }
+
+    pub fn select_single(&mut self, path: String) {
+        self.selected_paths.clear();
+        self.selected_paths.insert(path.clone());
+        self.selected_path = Some(path);
+    }
+
+    pub fn toggle_selection(&mut self, path: String) {
+        if self.selected_paths.contains(&path) {
+            self.selected_paths.remove(&path);
+            if self.selected_path.as_deref() == Some(&path) {
+                self.selected_path = self.selected_paths.iter().next().cloned();
+            }
+        } else {
+            self.selected_paths.insert(path.clone());
+            self.selected_path = Some(path);
+        }
+    }
+
+    pub fn select_range(&mut self, path: String, all_paths: &[String]) {
+        if let Some(anchor) = &self.selected_path {
+            let p1 = all_paths.iter().position(|p| p == anchor);
+            let p2 = all_paths.iter().position(|p| p == &path);
+            if let (Some(a), Some(b)) = (p1, p2) {
+                let (start, end) = if a <= b { (a, b) } else { (b, a) };
+                for p in &all_paths[start..=end] {
+                    self.selected_paths.insert(p.clone());
+                }
+                self.selected_path = Some(path);
+                return;
+            }
+        }
+        self.select_single(path);
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selected_paths.clear();
+        self.selected_path = None;
+    }
+
+    pub fn selected_count(&self) -> usize {
+        let count = self.selected_paths.len();
+        if count == 0 && self.selected_path.is_some() {
+            1
+        } else {
+            count
+        }
+    }
+
+    pub fn get_all_selected(&self) -> Vec<String> {
+        let mut set = self.selected_paths.clone();
+        if let Some(p) = &self.selected_path {
+            set.insert(p.clone());
+        }
+        set.into_iter().collect()
     }
 }
 
@@ -633,6 +697,26 @@ fn render_content(app: &mut FilmcraftApp, ui: &mut Ui, rect: Rect, projects: &[P
             .layout(egui::Layout::top_down(egui::Align::Min)),
     );
 
+    // Shortcut: Delete or Backspace removes all selected projects from recent list
+    let no_modals = !app.ui.project_browser.new_project_modal
+        && !app.ui.project_browser.new_folder_modal
+        && app.ui.project_browser.rename_modal.is_none();
+    if no_modals && ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
+        let all_sel = app.ui.project_browser.get_all_selected();
+        if !all_sel.is_empty() {
+            let set: HashSet<String> = all_sel.into_iter().collect();
+            app.session.prefs.general.recent_projects.retain(|p| !set.contains(p));
+            for p in &set {
+                app.ui.project_browser.project_folders.remove(p);
+                app.ui.project_browser.selected_paths.remove(p);
+            }
+            if let Some(sp) = &app.ui.project_browser.selected_path && set.contains(sp) {
+                app.ui.project_browser.selected_path = None;
+            }
+            save_persisted_manager(app);
+        }
+    }
+
     ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(&mut content_ui, |ui| {
@@ -650,6 +734,8 @@ fn render_grid_view(app: &mut FilmcraftApp, ui: &mut Ui, projects: &[ProjectCard
 
     let avail_w = ui.available_width();
     let cols = ((avail_w / (card_w + 16.0)).floor() as usize).max(1);
+
+    let all_paths: Vec<String> = projects.iter().map(|p| p.path.clone()).collect();
 
     ui.add_space(4.0);
     egui::Grid::new("pm-project-grid")
@@ -699,12 +785,12 @@ fn render_grid_view(app: &mut FilmcraftApp, ui: &mut Ui, projects: &[ProjectCard
             // Project Cards
             let mut project_to_open = None;
             let mut project_to_rename = None;
-            let mut project_to_delete = None;
-            let mut move_project_to_folder: Option<(String, String)> = None;
-            let mut move_to_storage: Option<String> = None;
+            let mut projects_to_delete: Option<Vec<String>> = None;
+            let mut move_projects_to_folder: Option<(Vec<String>, String)> = None;
+            let mut move_projects_to_storage: Option<Vec<String>> = None;
 
             for prj in projects {
-                let is_selected = app.ui.project_browser.selected_path.as_deref() == Some(&prj.path);
+                let is_selected = app.ui.project_browser.is_selected(&prj.path);
                 let (rect, resp) = ui.allocate_exact_size(vec2(card_w, card_h), Sense::click());
                 let p = ui.painter().clone();
 
@@ -712,16 +798,7 @@ fn render_grid_view(app: &mut FilmcraftApp, ui: &mut Ui, projects: &[ProjectCard
 
                 // Card frame
                 let bg_card = Color32::from_rgb(26, 30, 36);
-                let border_col = if is_selected {
-                    Color32::from_rgb(50, 140, 250)
-                } else if is_hovered {
-                    Color32::from_rgb(70, 120, 190)
-                } else {
-                    Color32::from_rgb(38, 44, 54)
-                };
-
                 p.rect_filled(rect, 6.0, bg_card);
-                p.rect_stroke(rect, 6.0, Stroke::new(if is_selected { 2.0 } else { 1.0 }, border_col), StrokeKind::Inside);
 
                 // 16:9 Thumbnail Area
                 let thumb_h = card_w * (9.0 / 16.0);
@@ -767,9 +844,44 @@ fn render_grid_view(app: &mut FilmcraftApp, ui: &mut Ui, projects: &[ProjectCard
                     p.text(pos2(rect.max.x - 10.0, meta_y + 18.0), Align2::RIGHT_TOP, f_badge, Tokens::ui(9.5), Color32::from_rgb(100, 160, 220));
                 }
 
-                // Click and Double Click
+                // Border & Selection highlight — drawn on top of the whole card
+                let border_col = if is_selected {
+                    Color32::from_rgb(50, 140, 250)
+                } else if is_hovered {
+                    Color32::from_rgb(70, 120, 190)
+                } else {
+                    Color32::from_rgb(38, 44, 54)
+                };
+                let stroke_w = if is_selected { 2.0 } else { 1.0 };
+                p.rect_stroke(rect, 6.0, Stroke::new(stroke_w, border_col), StrokeKind::Inside);
+
+                if is_selected {
+                    p.rect_filled(rect, 6.0, Color32::from_rgba_unmultiplied(45, 130, 245, 20));
+
+                    // Corner checkmark badge
+                    let chk_r = Rect::from_center_size(pos2(thumb_rect.max.x - 14.0, thumb_rect.min.y + 14.0), vec2(18.0, 18.0));
+                    p.rect_filled(chk_r, 9.0, Color32::from_rgb(45, 130, 245));
+                    let p1 = pos2(chk_r.min.x + 4.5, chk_r.center().y);
+                    let p2 = pos2(chk_r.min.x + 7.5, chk_r.max.y - 5.0);
+                    let p3 = pos2(chk_r.max.x - 4.5, chk_r.min.y + 5.0);
+                    p.line_segment([p1, p2], Stroke::new(2.0, Color32::WHITE));
+                    p.line_segment([p2, p3], Stroke::new(2.0, Color32::WHITE));
+                }
+
+                // Click and Multi-Selection
                 if resp.clicked() {
-                    app.ui.project_browser.selected_path = Some(prj.path.clone());
+                    let is_ctrl = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
+                    let is_shift = ui.input(|i| i.modifiers.shift);
+                    if is_ctrl {
+                        app.ui.project_browser.toggle_selection(prj.path.clone());
+                    } else if is_shift {
+                        app.ui.project_browser.select_range(prj.path.clone(), &all_paths);
+                    } else {
+                        app.ui.project_browser.select_single(prj.path.clone());
+                    }
+                }
+                if resp.secondary_clicked() && !is_selected {
+                    app.ui.project_browser.select_single(prj.path.clone());
                 }
                 if resp.double_clicked() {
                     project_to_open = Some(prj.clone());
@@ -780,45 +892,76 @@ fn render_grid_view(app: &mut FilmcraftApp, ui: &mut Ui, projects: &[ProjectCard
                 let name_clone = prj.name.clone();
                 let is_demo_val = prj.is_demo;
                 let folders_list = app.ui.project_browser.folders.clone();
+                let sel_count = app.ui.project_browser.selected_count();
+                let all_selected = app.ui.project_browser.get_all_selected();
+                let is_in_multisel = sel_count > 1 && all_selected.contains(&path_clone);
 
                 resp.context_menu(|ui| {
-                    if ui.button("Abrir proyecto").clicked() {
-                        project_to_open = Some(prj.clone());
-                        ui.close();
-                    }
-                    if !is_demo_val {
-                        if ui.button("Renombrar").clicked() {
-                            project_to_rename = Some((path_clone.clone(), name_clone.clone()));
-                            ui.close();
-                        }
-                        if ui.button("Duplicar").clicked() {
-                            duplicate_project_file(&path_clone);
-                            ui.close();
-                        }
-                        ui.menu_button("Mover a carpeta", |ui| {
+                    if is_in_multisel {
+                        ui.label(format!("{sel_count} proyectos seleccionados"));
+                        ui.separator();
+                        ui.menu_button("Mover seleccionados a carpeta", |ui| {
                             if ui.button("(Sin carpeta)").clicked() {
-                                move_project_to_folder = Some((path_clone.clone(), String::new()));
+                                move_projects_to_folder = Some((all_selected.clone(), String::new()));
                                 ui.close();
                             }
                             for f in &folders_list {
                                 if ui.button(f).clicked() {
-                                    move_project_to_folder = Some((path_clone.clone(), f.clone()));
+                                    move_projects_to_folder = Some((all_selected.clone(), f.clone()));
                                     ui.close();
                                 }
                             }
                         });
                         let storage_dir = projects_storage_dir();
-                        let is_in_storage = Path::new(&path_clone).starts_with(&storage_dir);
-                        if !is_in_storage {
-                            if ui.button("Mover a carpeta de proyectos").clicked() {
-                                move_to_storage = Some(path_clone.clone());
-                                ui.close();
-                            }
+                        let any_not_in_storage = all_selected.iter().any(|p| !Path::new(p).starts_with(&storage_dir));
+                        if any_not_in_storage && ui.button("Mover a carpeta de proyectos").clicked() {
+                            move_projects_to_storage = Some(all_selected.clone());
+                            ui.close();
                         }
                         ui.separator();
-                        if ui.button("Eliminar de la lista").clicked() {
-                            project_to_delete = Some(path_clone.clone());
+                        if ui.button(format!("Eliminar {sel_count} proyectos de la lista")).clicked() {
+                            projects_to_delete = Some(all_selected.clone());
                             ui.close();
+                        }
+                    } else {
+                        if ui.button("Abrir proyecto").clicked() {
+                            project_to_open = Some(prj.clone());
+                            ui.close();
+                        }
+                        if !is_demo_val {
+                            if ui.button("Renombrar").clicked() {
+                                project_to_rename = Some((path_clone.clone(), name_clone.clone()));
+                                ui.close();
+                            }
+                            if ui.button("Duplicar").clicked() {
+                                duplicate_project_file(&path_clone);
+                                ui.close();
+                            }
+                            ui.menu_button("Mover a carpeta", |ui| {
+                                if ui.button("(Sin carpeta)").clicked() {
+                                    move_projects_to_folder = Some((vec![path_clone.clone()], String::new()));
+                                    ui.close();
+                                }
+                                for f in &folders_list {
+                                    if ui.button(f).clicked() {
+                                        move_projects_to_folder = Some((vec![path_clone.clone()], f.clone()));
+                                        ui.close();
+                                    }
+                                }
+                            });
+                            let storage_dir = projects_storage_dir();
+                            let is_in_storage = Path::new(&path_clone).starts_with(&storage_dir);
+                            if !is_in_storage {
+                                if ui.button("Mover a carpeta de proyectos").clicked() {
+                                    move_projects_to_storage = Some(vec![path_clone.clone()]);
+                                    ui.close();
+                                }
+                            }
+                            ui.separator();
+                            if ui.button("Eliminar de la lista").clicked() {
+                                projects_to_delete = Some(vec![path_clone.clone()]);
+                                ui.close();
+                            }
                         }
                     }
                 });
@@ -838,20 +981,31 @@ fn render_grid_view(app: &mut FilmcraftApp, ui: &mut Ui, projects: &[ProjectCard
                 app.ui.project_browser.rename_modal = Some(path);
                 app.ui.project_browser.modal_input = name;
             }
-            if let Some(path) = move_to_storage {
-                move_project_to_storage(&path, app);
+            if let Some(paths) = move_projects_to_storage {
+                for path in paths {
+                    move_project_to_storage(&path, app);
+                }
             }
-            if let Some((path, f)) = move_project_to_folder {
-                if f.is_empty() {
-                    app.ui.project_browser.project_folders.remove(&path);
-                } else {
-                    app.ui.project_browser.project_folders.insert(path, f);
+            if let Some((paths, f)) = move_projects_to_folder {
+                for path in paths {
+                    if f.is_empty() {
+                        app.ui.project_browser.project_folders.remove(&path);
+                    } else {
+                        app.ui.project_browser.project_folders.insert(path, f.clone());
+                    }
                 }
                 save_persisted_manager(app);
             }
-            if let Some(path) = project_to_delete {
-                app.session.prefs.general.recent_projects.retain(|p| p != &path);
-                app.ui.project_browser.project_folders.remove(&path);
+            if let Some(paths) = projects_to_delete {
+                let set: HashSet<String> = paths.into_iter().collect();
+                app.session.prefs.general.recent_projects.retain(|p| !set.contains(p));
+                for p in &set {
+                    app.ui.project_browser.project_folders.remove(p);
+                    app.ui.project_browser.selected_paths.remove(p);
+                }
+                if let Some(sp) = &app.ui.project_browser.selected_path && set.contains(sp) {
+                    app.ui.project_browser.selected_path = None;
+                }
                 save_persisted_manager(app);
             }
         });
@@ -917,15 +1071,20 @@ fn render_list_view(app: &mut FilmcraftApp, ui: &mut Ui, projects: &[ProjectCard
     hx += col_size_w;
     p.text(pos2(hx, h_rect.center().y), Align2::LEFT_CENTER, "UBICACIÓN", Tokens::semibold(10.0), Color32::from_rgb(130, 140, 155));
 
+    let all_paths: Vec<String> = projects.iter().map(|p| p.path.clone()).collect();
     let mut project_to_open = None;
+    let mut project_to_rename = None;
+    let mut projects_to_delete: Option<Vec<String>> = None;
+    let mut move_projects_to_folder: Option<(Vec<String>, String)> = None;
+    let mut move_projects_to_storage: Option<Vec<String>> = None;
 
     for (i, prj) in projects.iter().enumerate() {
-        let is_selected = app.ui.project_browser.selected_path.as_deref() == Some(&prj.path);
+        let is_selected = app.ui.project_browser.is_selected(&prj.path);
         let (row_r, resp) = ui.allocate_exact_size(vec2(avail_w, row_h), Sense::click());
         let is_hovered = resp.hovered();
 
         let bg = if is_selected {
-            Color32::from_rgb(35, 50, 70)
+            Color32::from_rgb(30, 52, 85)
         } else if is_hovered {
             Color32::from_rgb(28, 34, 42)
         } else if i % 2 == 0 {
@@ -934,6 +1093,10 @@ fn render_list_view(app: &mut FilmcraftApp, ui: &mut Ui, projects: &[ProjectCard
             Color32::from_rgb(22, 25, 30)
         };
         p.rect_filled(row_r, 0.0, bg);
+        if is_selected {
+            p.rect_stroke(row_r, 0.0, Stroke::new(1.0, Color32::from_rgb(50, 140, 250)), StrokeKind::Inside);
+            p.rect_filled(Rect::from_min_size(row_r.min, vec2(3.0, row_r.height())), 0.0, Color32::from_rgb(50, 140, 250));
+        }
 
         let mut rx = row_r.min.x + 12.0;
         icons::paint(&p, Rect::from_center_size(pos2(rx + 6.0, row_r.center().y), vec2(13.0, 13.0)), if prj.is_demo { Icon::Sequence } else { Icon::Film }, if is_selected { Color32::WHITE } else { Color32::from_rgb(140, 170, 220) });
@@ -952,16 +1115,138 @@ fn render_list_view(app: &mut FilmcraftApp, ui: &mut Ui, projects: &[ProjectCard
 
         p.text(pos2(rx, row_r.center().y), Align2::LEFT_CENTER, &prj.path, Tokens::ui(10.0), Color32::from_rgb(100, 110, 125));
 
+        // Click and Multi-Selection
         if resp.clicked() {
-            app.ui.project_browser.selected_path = Some(prj.path.clone());
+            let is_ctrl = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
+            let is_shift = ui.input(|i| i.modifiers.shift);
+            if is_ctrl {
+                app.ui.project_browser.toggle_selection(prj.path.clone());
+            } else if is_shift {
+                app.ui.project_browser.select_range(prj.path.clone(), &all_paths);
+            } else {
+                app.ui.project_browser.select_single(prj.path.clone());
+            }
+        }
+        if resp.secondary_clicked() && !is_selected {
+            app.ui.project_browser.select_single(prj.path.clone());
         }
         if resp.double_clicked() {
             project_to_open = Some(prj.clone());
         }
+
+        // Context menu in list view
+        let path_clone = prj.path.clone();
+        let name_clone = prj.name.clone();
+        let is_demo_val = prj.is_demo;
+        let folders_list = app.ui.project_browser.folders.clone();
+        let sel_count = app.ui.project_browser.selected_count();
+        let all_selected = app.ui.project_browser.get_all_selected();
+        let is_in_multisel = sel_count > 1 && all_selected.contains(&path_clone);
+
+        resp.context_menu(|ui| {
+            if is_in_multisel {
+                ui.label(format!("{sel_count} proyectos seleccionados"));
+                ui.separator();
+                ui.menu_button("Mover seleccionados a carpeta", |ui| {
+                    if ui.button("(Sin carpeta)").clicked() {
+                        move_projects_to_folder = Some((all_selected.clone(), String::new()));
+                        ui.close();
+                    }
+                    for f in &folders_list {
+                        if ui.button(f).clicked() {
+                            move_projects_to_folder = Some((all_selected.clone(), f.clone()));
+                            ui.close();
+                        }
+                    }
+                });
+                let storage_dir = projects_storage_dir();
+                let any_not_in_storage = all_selected.iter().any(|p| !Path::new(p).starts_with(&storage_dir));
+                if any_not_in_storage && ui.button("Mover a carpeta de proyectos").clicked() {
+                    move_projects_to_storage = Some(all_selected.clone());
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button(format!("Eliminar {sel_count} proyectos de la lista")).clicked() {
+                    projects_to_delete = Some(all_selected.clone());
+                    ui.close();
+                }
+            } else {
+                if ui.button("Abrir proyecto").clicked() {
+                    project_to_open = Some(prj.clone());
+                    ui.close();
+                }
+                if !is_demo_val {
+                    if ui.button("Renombrar").clicked() {
+                        project_to_rename = Some((path_clone.clone(), name_clone.clone()));
+                        ui.close();
+                    }
+                    if ui.button("Duplicar").clicked() {
+                        duplicate_project_file(&path_clone);
+                        ui.close();
+                    }
+                    ui.menu_button("Mover a carpeta", |ui| {
+                        if ui.button("(Sin carpeta)").clicked() {
+                            move_projects_to_folder = Some((vec![path_clone.clone()], String::new()));
+                            ui.close();
+                        }
+                        for f in &folders_list {
+                            if ui.button(f).clicked() {
+                                move_projects_to_folder = Some((vec![path_clone.clone()], f.clone()));
+                                ui.close();
+                            }
+                        }
+                    });
+                    let storage_dir = projects_storage_dir();
+                    let is_in_storage = Path::new(&path_clone).starts_with(&storage_dir);
+                    if !is_in_storage {
+                        if ui.button("Mover a carpeta de proyectos").clicked() {
+                            move_projects_to_storage = Some(vec![path_clone.clone()]);
+                            ui.close();
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("Eliminar de la lista").clicked() {
+                        projects_to_delete = Some(vec![path_clone.clone()]);
+                        ui.close();
+                    }
+                }
+            }
+        });
     }
 
     if let Some(prj) = project_to_open {
         open_project_entry(app, &prj);
+    }
+    if let Some((path, name)) = project_to_rename {
+        app.ui.project_browser.rename_modal = Some(path);
+        app.ui.project_browser.modal_input = name;
+    }
+    if let Some(paths) = move_projects_to_storage {
+        for path in paths {
+            move_project_to_storage(&path, app);
+        }
+    }
+    if let Some((paths, f)) = move_projects_to_folder {
+        for path in paths {
+            if f.is_empty() {
+                app.ui.project_browser.project_folders.remove(&path);
+            } else {
+                app.ui.project_browser.project_folders.insert(path, f.clone());
+            }
+        }
+        save_persisted_manager(app);
+    }
+    if let Some(paths) = projects_to_delete {
+        let set: HashSet<String> = paths.into_iter().collect();
+        app.session.prefs.general.recent_projects.retain(|p| !set.contains(p));
+        for p in &set {
+            app.ui.project_browser.project_folders.remove(p);
+            app.ui.project_browser.selected_paths.remove(p);
+        }
+        if let Some(sp) = &app.ui.project_browser.selected_path && set.contains(sp) {
+            app.ui.project_browser.selected_path = None;
+        }
+        save_persisted_manager(app);
     }
 }
 
@@ -988,23 +1273,28 @@ fn render_bottom_bar(app: &mut FilmcraftApp, ui: &mut Ui, rect: Rect, count: usi
 
     let p_btn_w = 120.0;
     let p_r = Rect::from_min_size(pos2(x, rect.center().y - 13.0), vec2(p_btn_w, 26.0));
-    let p_resp = ui.interact(p_r, Id::unique("pm-bot-new-proj"), Sense::click());
-    p.rect_filled(p_r, 4.0, if p_resp.hovered() { t.hover } else { Color32::from_rgb(30, 35, 42) });
-    p.text(p_r.center(), Align2::CENTER_CENTER, "Nuevo Proyecto", Tokens::ui(11.0), t.text);
+    let p_resp = ui.interact(p_r, Id::unique("pm-bot-proj"), Sense::click());
+    p.rect_filled(p_r, 4.0, if p_resp.hovered() { Color32::from_rgb(45, 125, 235) } else { Color32::from_rgb(35, 105, 210) });
+    p.text(p_r.center(), Align2::CENTER_CENTER, "Nuevo Proyecto", Tokens::semibold(11.5), Color32::WHITE);
     if p_resp.clicked() {
         app.ui.project_browser.new_project_modal = true;
         app.ui.project_browser.modal_input = "Sin título".into();
     }
 
     // Center info
-    let info = format!("Mostrando {count} proyectos");
+    let sel_count = app.ui.project_browser.selected_count();
+    let info = if sel_count > 1 {
+        format!("Mostrando {count} proyectos · {sel_count} seleccionados")
+    } else {
+        format!("Mostrando {count} proyectos")
+    };
     p.text(rect.center(), Align2::CENTER_CENTER, info, Tokens::ui(11.0), Color32::from_rgb(120, 130, 145));
 
     // Right Action Buttons
     let mut rx = rect.max.x - 16.0;
 
-    // Open Selected Project
-    let has_sel = app.ui.project_browser.selected_path.is_some();
+    // Open Selected Project (first selected)
+    let has_sel = sel_count > 0;
     let open_w = 100.0;
     rx -= open_w;
     let open_r = Rect::from_min_size(pos2(rx, rect.center().y - 13.0), vec2(open_w, 26.0));
@@ -1017,9 +1307,10 @@ fn render_bottom_bar(app: &mut FilmcraftApp, ui: &mut Ui, rect: Rect, count: usi
     p.rect_filled(open_r, 4.0, open_bg);
     p.text(open_r.center(), Align2::CENTER_CENTER, "Abrir", Tokens::semibold(11.5), if has_sel { Color32::WHITE } else { t.text_faint });
     if has_sel && open_resp.clicked() {
-        if let Some(path) = &app.ui.project_browser.selected_path {
+        let first_path = app.ui.project_browser.selected_path.clone().or_else(|| app.ui.project_browser.selected_paths.iter().next().cloned());
+        if let Some(path) = first_path {
             let prj_card = ProjectCard {
-                name: Path::new(path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
+                name: Path::new(&path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
                 path: path.clone(),
                 modified: SystemTime::now(),
                 size_bytes: 0,
@@ -1028,6 +1319,31 @@ fn render_bottom_bar(app: &mut FilmcraftApp, ui: &mut Ui, rect: Rect, count: usi
                 is_demo: path == "builtin:demo",
             };
             open_project_entry(app, &prj_card);
+        }
+    }
+
+    // If multiple selected, show Delete button on bottom bar
+    if sel_count > 1 {
+        rx -= 10.0;
+        let del_w = 130.0;
+        rx -= del_w;
+        let del_r = Rect::from_min_size(pos2(rx, rect.center().y - 13.0), vec2(del_w, 26.0));
+        let del_resp = ui.interact(del_r, Id::unique("pm-bot-del-multi"), Sense::click());
+        let del_bg = if del_resp.hovered() { Color32::from_rgb(175, 45, 50) } else { Color32::from_rgb(120, 32, 38) };
+        p.rect_filled(del_r, 4.0, del_bg);
+        p.text(del_r.center(), Align2::CENTER_CENTER, format!("Eliminar ({sel_count})"), Tokens::semibold(11.0), Color32::WHITE);
+        if del_resp.clicked() {
+            let all_sel = app.ui.project_browser.get_all_selected();
+            let set: HashSet<String> = all_sel.into_iter().collect();
+            app.session.prefs.general.recent_projects.retain(|p| !set.contains(p));
+            for p in &set {
+                app.ui.project_browser.project_folders.remove(p);
+                app.ui.project_browser.selected_paths.remove(p);
+            }
+            if let Some(sp) = &app.ui.project_browser.selected_path && set.contains(sp) {
+                app.ui.project_browser.selected_path = None;
+            }
+            save_persisted_manager(app);
         }
     }
 
@@ -1045,7 +1361,6 @@ fn render_bottom_bar(app: &mut FilmcraftApp, ui: &mut Ui, rect: Rect, count: usi
         }
     }
 }
-
 fn render_modals(app: &mut FilmcraftApp, ui: &mut Ui, screen_rect: Rect) {
     let p = ui.painter().clone();
 
