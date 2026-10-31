@@ -277,7 +277,7 @@ impl Drop for DecodingGuard {
 /// A decoder keeps its reference and in-flight pictures (hundreds of MB for a frame-threaded
 /// 4K decoder), so only this many caches keep theirs once idle: a timeline's other clips make a
 /// new one when the playhead reaches them, which costs what a seek costs.
-const MAX_LIVE_DECODERS: usize = 2;
+const MAX_LIVE_DECODERS: usize = 4;
 
 /// A cache asked for a frame this recently may be needed again soon (the next clip being
 /// prefetched, a clip the user scrubs back to): it keeps its decoder up to [`HARD_DECODERS`], and
@@ -298,12 +298,12 @@ const RECENT: Duration = Duration::from_millis(500);
 
 /// Most decoders caches idle for [`RECENT`] to [`IDLE`] keep together (a composite of a few
 /// layers plus the clips just left behind).
-const HARD_DECODERS: usize = 3;
+const HARD_DECODERS: usize = 8;
 
 /// Decoded frames all caches may hold together before idle ones give theirs up. Each cache also
 /// has its own budget, which alone let every clip on a timeline keep hundreds of MB of frames
 /// nobody was looking at.
-pub const FRAME_BUDGET: usize = 256 << 20;
+pub const FRAME_BUDGET: usize = 1 << 30;
 
 /// What the caches of a process share: the cap on live decoders and the frame budget.
 struct Pool {
@@ -318,7 +318,7 @@ struct Pool {
     hard_decoders: usize,
     /// Bytes of the frames the caches hold.
     bytes: AtomicUsize,
-    budget: AtomicUsize,
+    budget: usize,
 }
 
 /// The part of a [`GopCache`] its pool reaches.
@@ -354,7 +354,7 @@ impl Pool {
             recent: idle,
             hard_decoders: max_decoders,
             bytes: AtomicUsize::new(0),
-            budget: AtomicUsize::new(budget),
+            budget,
         }
     }
 
@@ -456,7 +456,7 @@ impl Pool {
     /// budget. Caches in use keep theirs (each within its own budget): a frame evicted before it is shown costs a
     /// re-decode from the keyframe.
     fn trim_frames(&self, me: &Shared) {
-        let over = || self.bytes.load(Ordering::Relaxed) > self.budget.load(Ordering::Relaxed);
+        let over = || self.bytes.load(Ordering::Relaxed) > self.budget;
         if !over() {
             return;
         }
@@ -469,59 +469,6 @@ impl Pool {
             }
         }
     }
-
-    /// Force release of all decoders and all cached frames across all caches in the process.
-    fn emergency_release_all(&self) -> Vec<Box<dyn VideoDecoder>> {
-        let all: Vec<Arc<Shared>> = self.caches.lock().unwrap_or_else(PoisonError::into_inner).iter().filter_map(Weak::upgrade).collect();
-        let mut released = Vec::new();
-        for c in all {
-            if let Some(mut st) = try_state(&c) {
-                released.extend(st.release_decoder(self));
-                st.frames.clear();
-                st.drafts.clear();
-                self.bytes.fetch_sub(st.bytes, Ordering::Relaxed);
-                st.bytes = 0;
-            }
-        }
-        released
-    }
-}
-
-/// Dynamically configure the frame cache budget shared across all video decoders in the process.
-pub fn set_frame_budget(bytes: usize) {
-    Pool::global().budget.store(bytes.max(64 << 20), Ordering::Relaxed);
-}
-
-/// Evict idle decoders and cached frames across all video caches in the process.
-pub fn trim_idle() {
-    let pool = Pool::global();
-    let me = Arc::new(Shared {
-        state: Mutex::new(State {
-            decoder: None,
-            intra: false,
-            spare: Vec::new(),
-            next: usize::MAX,
-            start: 0,
-            out_max: i64::MIN,
-            frames: BTreeMap::new(),
-            drafts: Default::default(),
-            bytes: 0,
-            last_used: Instant::now(),
-            pin: i64::MIN,
-            background: false,
-        }),
-        pool: pool.clone(),
-    });
-    let dropped = pool.trim_decoders(&me);
-    drop(dropped);
-    pool.trim_frames(&me);
-}
-
-/// Emergency release of all decoders and all cached video frames across the entire process.
-pub fn emergency_release_all() {
-    let pool = Pool::global();
-    let dropped = pool.emergency_release_all();
-    drop(dropped);
 }
 
 /// Free the decoded frames and the decoders of every cache that nobody is using right now,
@@ -563,7 +510,7 @@ const MIN_FRAMES: usize = 64;
 /// A source cache never retains more decoded pixels than this, regardless of frame dimensions.
 /// In particular, untrusted VP9 `show_existing_frame` samples must not turn the small-frame
 /// reserve above into an unbounded number of full-resolution copies.
-const FRAME_CACHE_CEILING: usize = 96 << 20;
+const FRAME_CACHE_CEILING: usize = 384 << 20;
 
 /// A running decoder up to this many samples before the wanted sample's sync sample keeps going
 /// rather than restarting at the sync sample.
@@ -871,7 +818,6 @@ impl GopCache {
             return Err(CodecError::Decode("no video decoder".into()));
         };
         decoder.set_draft(draft);
-        let mut retried = false;
         while st.next < limit {
             if filmcraft_media::cancel::cancelled() {
                 // The decoder state stays consistent (`next`, `out_max`): a later request continues.
@@ -887,29 +833,7 @@ impl GopCache {
             let Some(decoder) = st.decoder.as_mut() else {
                 return Err(CodecError::Decode("no video decoder".into()));
             };
-            let out = match timed(|| decoder.decode(&data, s.pts(k))) {
-                Ok(out) => out,
-                Err(e) if continuing && !retried => {
-                    log::warn!("decoder failed mid-GOP at sample {k} ({e}): restarting from sync sample {key}");
-                    retried = true;
-                    let mut restart = key;
-                    while restart > 0 {
-                        let data = s.read(restart)?;
-                        if st.decoder.as_ref().and_then(|d| d.is_random_access(&data)) != Some(false) {
-                            break;
-                        }
-                        restart = s.sync_before(restart - 1);
-                    }
-                    if let Some(d) = st.decoder.as_mut() {
-                        d.reset();
-                    }
-                    st.next = restart;
-                    st.start = restart;
-                    st.out_max = i64::MIN;
-                    continue;
-                }
-                Err(e) => return Err(e),
-            };
+            let out = timed(|| decoder.decode(&data, s.pts(k)))?;
             st.next += 1;
             DECODED.fetch_add(1, Ordering::Relaxed);
             self.store_output(st, out);
@@ -969,29 +893,10 @@ impl GopCache {
         let limit = (i + 64).min(n);
         let mut out = Vec::new();
         let mut found = false;
-        let mut retried = false;
         while *next < limit {
             let k = *next;
             let data = s.read(k)?;
-            let pics = match timed(|| d.decode(&data, s.pts(k))) {
-                Ok(pics) => pics,
-                Err(e) if continuing && !retried => {
-                    log::warn!("decoder failed mid-GOP at sample {k} ({e}): restarting from sync sample {key}");
-                    retried = true;
-                    let mut restart = key;
-                    while restart > 0 {
-                        let data = s.read(restart)?;
-                        if d.is_random_access(&data) != Some(false) {
-                            break;
-                        }
-                        restart = s.sync_before(restart - 1);
-                    }
-                    d.reset();
-                    *next = restart;
-                    continue;
-                }
-                Err(e) => return Err(e),
-            };
+            let pics = timed(|| d.decode(&data, s.pts(k)))?;
             count_frames(&pics);
             *next += 1;
             found |= pics.iter().any(|p| p.pts == want_pts);

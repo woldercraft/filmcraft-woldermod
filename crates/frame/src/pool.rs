@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use crate::{PixelData, VideoFrame};
 
 /// Bytes of idle buffers kept per sample type; a buffer that does not fit is freed.
-const MAX_BYTES: usize = 64 << 20;
+const MAX_BYTES: usize = 192 << 20;
 
 /// Smaller buffers are not worth keeping (the allocator recycles those well).
 const MIN_BYTES: usize = 64 << 10;
@@ -72,7 +72,7 @@ static REUSED: AtomicU64 = AtomicU64::new(0);
 static F32: Mutex<Vec<Vec<f32>>> = Mutex::new(Vec::new());
 
 /// Bytes of idle float images kept; a buffer that does not fit is freed.
-const F32_MAX_BYTES: usize = 96 << 20;
+const F32_MAX_BYTES: usize = 320 << 20;
 
 fn take<T>(shelf: &Mutex<Shelf<T>>, len: usize) -> Vec<T> {
     let found = shelf.lock().unwrap_or_else(PoisonError::into_inner).take(len);
@@ -160,12 +160,6 @@ pub fn trim_planes() {
     let u8s = std::mem::replace(&mut *U8.lock().unwrap_or_else(PoisonError::into_inner), Shelf::new());
     let u16s = std::mem::replace(&mut *U16.lock().unwrap_or_else(PoisonError::into_inner), Shelf::new());
     drop((u8s, u16s));
-}
-
-/// Free all idle buffers across all shelves (floats, 8-bit and 16-bit planes).
-pub fn trim_all() {
-    trim_f32();
-    trim_planes();
 }
 
 /// Idle buffers held and buffers handed out again so far (`perf.stats`).

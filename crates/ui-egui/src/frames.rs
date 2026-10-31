@@ -338,27 +338,17 @@ impl GpuPlan {
 }
 
 /// Finished plans, bounded by count and bytes (oldest use evicted first).
+#[derive(Default)]
 struct PlanCache {
     map: HashMap<FrameKey, (Arc<GpuPlan>, u64, usize)>,
     clock: u64,
     bytes: usize,
-    budget: usize,
-    max: usize,
-}
-
-impl Default for PlanCache {
-    fn default() -> Self {
-        Self {
-            map: HashMap::new(),
-            clock: 0,
-            bytes: 0,
-            budget: 64 << 20,
-            max: 8,
-        }
-    }
 }
 
 impl PlanCache {
+    const MAX: usize = 96;
+    const BUDGET: usize = 1 << 30;
+
     fn get(&mut self, k: &FrameKey) -> Option<Arc<GpuPlan>> {
         self.clock += 1;
         let clock = self.clock;
@@ -368,20 +358,6 @@ impl PlanCache {
         })
     }
 
-    fn trim(&mut self) {
-        if self.map.len() > self.max || self.bytes > self.budget {
-            let mut v: Vec<(u64, FrameKey, usize)> = self.map.iter().map(|(k, v)| (v.1, *k, v.2)).collect();
-            v.sort_unstable_by_key(|x| x.0);
-            for (_, k, b) in v {
-                if self.map.len() <= self.max && self.bytes <= self.budget {
-                    break;
-                }
-                self.map.remove(&k);
-                self.bytes -= b;
-            }
-        }
-    }
-
     fn insert(&mut self, k: FrameKey, p: GpuPlan) {
         self.clock += 1;
         let b = p.bytes();
@@ -389,7 +365,17 @@ impl PlanCache {
         if let Some((_, _, old)) = self.map.insert(k, (Arc::new(p), self.clock, b)) {
             self.bytes -= old;
         }
-        self.trim();
+        if self.map.len() > Self::MAX || self.bytes > Self::BUDGET {
+            let mut v: Vec<(u64, FrameKey, usize)> = self.map.iter().map(|(k, v)| (v.1, *k, v.2)).collect();
+            v.sort_unstable_by_key(|x| x.0);
+            for (_, k, b) in v {
+                if self.map.len() <= Self::MAX && self.bytes <= Self::BUDGET {
+                    break;
+                }
+                self.map.remove(&k);
+                self.bytes -= b;
+            }
+        }
     }
 }
 
@@ -401,7 +387,12 @@ struct Cache {
 }
 
 impl Cache {
-    fn trim(&mut self) {
+    fn insert(&mut self, k: FrameKey, v: Arc<Rgba>) {
+        self.clock += 1;
+        self.bytes += v.px.len();
+        if let Some((old, _)) = self.map.insert(k, (v, self.clock)) {
+            self.bytes -= old.px.len();
+        }
         if self.bytes > self.budget {
             let mut all: Vec<(u64, FrameKey, usize)> = self.map.iter().map(|(k, (v, s))| (*s, *k, v.px.len())).collect();
             all.sort_unstable_by_key(|x| x.0);
@@ -413,15 +404,6 @@ impl Cache {
                 self.bytes -= b;
             }
         }
-    }
-
-    fn insert(&mut self, k: FrameKey, v: Arc<Rgba>) {
-        self.clock += 1;
-        self.bytes += v.px.len();
-        if let Some((old, _)) = self.map.insert(k, (v, self.clock)) {
-            self.bytes -= old.px.len();
-        }
-        self.trim();
     }
 }
 
@@ -478,38 +460,13 @@ impl FrameServer {
     /// Settings ▸ Memory ▸ frame cache budget (bytes); evicts down to it right away.
     pub fn set_cache_budget(&self, bytes: usize) {
         let mut c = self.shared.done.lock().unwrap_or_else(PoisonError::into_inner);
-        c.budget = bytes.clamp(16 << 20, 256 << 20);
-        c.trim();
-        let mut p = self.shared.plans.lock().unwrap_or_else(PoisonError::into_inner);
-        p.budget = (bytes / 4).clamp(16 << 20, 96 << 20);
-        p.trim();
-        filmcraft_engine::set_frame_budget((bytes / 2).clamp(32 << 20, 256 << 20));
-    }
-
-    /// Emergency eviction of caches during memory pressure to prevent Linux OOM termination.
-    pub fn emergency_trim(&self) {
+        c.budget = bytes.max(16 << 20);
+        if c.bytes > c.budget
+            && let Some((k, v)) = c.map.iter().next().map(|(k, (v, _))| (*k, v.clone()))
         {
-            let mut c = self.shared.done.lock().unwrap_or_else(PoisonError::into_inner);
-            c.budget = 16 << 20;
-            // keep at most the newest frame
-            if c.map.len() > 1 {
-                let mut all: Vec<(u64, FrameKey, usize)> = c.map.iter().map(|(k, (v, s))| (*s, *k, v.px.len())).collect();
-                all.sort_unstable_by_key(|x| x.0);
-                let to_drop = all.len().saturating_sub(1);
-                for (_, k, b) in all.into_iter().take(to_drop) {
-                    c.map.remove(&k);
-                    c.bytes = c.bytes.saturating_sub(b);
-                }
-            }
+            // re-inserting an entry runs the eviction pass
+            c.insert(k, v);
         }
-        {
-            let mut p = self.shared.plans.lock().unwrap_or_else(PoisonError::into_inner);
-            p.budget = 16 << 20;
-            p.max = 1;
-            p.trim();
-        }
-        filmcraft_engine::emergency_release_all();
-        filmcraft_frame::pool::trim_all();
     }
 
     /// (bytes cached, budget).
@@ -522,7 +479,7 @@ impl FrameServer {
         let shared = Arc::new(Shared {
             queue: Mutex::new(VecDeque::new()),
             cv: Condvar::new(),
-            done: Mutex::new(Cache { map: HashMap::new(), bytes: 0, budget: 128 << 20, clock: 0 }),
+            done: Mutex::new(Cache { map: HashMap::new(), bytes: 0, budget: 768 << 20, clock: 0 }),
             plans: Mutex::new(PlanCache::default()),
             in_flight: Mutex::new(Vec::new()),
             profiling: AtomicBool::new(false),

@@ -70,7 +70,6 @@ pub use filmcraft_export as export;
 pub use filmcraft_project as project;
 pub use filmcraft_render as render;
 pub use filmcraft_time as time;
-pub use filmcraft_codecs::{emergency_release_all, set_frame_budget, trim_idle};
 pub use media_pool::MediaPool;
 
 /// The OS temp folder; `/tmp` on wasm32, where `std::env::temp_dir()` panics ("no filesystem on
