@@ -1064,9 +1064,9 @@ impl GpuCompositor {
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("filmcraft-composite-export") });
         self.record_plan(&mut enc, plan, prep, true, false);
         let size = self.copy_accumulator(&mut enc)?;
-        let sub = self.queue.submit([enc.finish()]);
+        self.queue.submit([enc.finish()]);
         export_renderer::timing::add_submit(t.elapsed());
-        self.map_accumulator(size, Some(sub))
+        self.map_accumulator(size)
     }
 
     /// Fast-path SDR export rendering over black: composites `plan` and resolves it on the GPU
@@ -1162,7 +1162,7 @@ impl GpuCompositor {
             wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) } },
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
-        let sub = self.queue.submit([enc.finish()]);
+        self.queue.submit([enc.finish()]);
         stage.end_frame();
         let slice = buf.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1190,8 +1190,8 @@ impl GpuCompositor {
     pub fn read_accumulator(&mut self) -> Option<(u32, u32, Vec<f32>)> {
         let mut enc = self.device.create_command_encoder(&Default::default());
         let size = self.copy_accumulator(&mut enc)?;
-        let sub = self.queue.submit([enc.finish()]);
-        self.map_accumulator(size, Some(sub))
+        self.queue.submit([enc.finish()]);
+        self.map_accumulator(size)
     }
 
     /// Record a copy of the resolved RGBA8 output into the reusable staging buffer.
@@ -1326,9 +1326,6 @@ impl GpuCompositor {
             }
             true
         });
-            }
-            true
-        });
         drop(data);
         if !converted {
             return None;
@@ -1355,7 +1352,7 @@ impl GpuCompositor {
             wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(*h) } },
             wgpu::Extent3d { width: *w, height: *h, depth_or_array_layers: 1 },
         );
-        let sub = self.queue.submit([enc.finish()]);
+        self.queue.submit([enc.finish()]);
         let slice = buf.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| {
@@ -1402,7 +1399,6 @@ fn wait_mapped<T>(device: &wgpu::Device, rx: &std::sync::mpsc::Receiver<Result<(
 pub(crate) fn copy_mapped(src: &[u8], line: &mut Vec<u8>) {
     line.clear();
     line.extend_from_slice(src);
-}
 }
 
 /// Shader source: kind (0 RGBA8 sRGB, 1 linear premultiplied RGBA, 2 YUV), sampling scales, dimensions, color.

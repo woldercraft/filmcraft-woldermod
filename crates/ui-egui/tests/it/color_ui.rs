@@ -846,4 +846,3 @@ fn a_click_on_the_lumetri_curve_places_a_point() {
     d.frames(3);
     assert_eq!(points(&mut d), before + 1, "a click off the curve adds none");
 }
-}

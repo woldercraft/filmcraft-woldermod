@@ -295,8 +295,6 @@ pub(super) fn settings_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: R
                     open_manager = true;
                 }
             });
-                }
-            });
             row(ui, &t, tl!("Format"), |ui| {
                 // a format without an encoder here says why: H.265 and AV1 have hardware encoders only
                 let labels: Vec<(String, Option<&str>)> = Format::ALL.iter().map(|f| (f.label().to_string(), unavailable_why(*f))).collect();

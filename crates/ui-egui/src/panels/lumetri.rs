@@ -303,9 +303,6 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, current_panel
                 });
             });
         }
-                });
-            });
-        }
         _ => {
             // default: "top"
             render_palette_toolbar(&mut bui, app, &e, current_panel, false, &mut sections);
@@ -819,7 +816,8 @@ fn render_single_palette(
                 ("curve_green", Color32::from_rgb(80, 200, 90)),
                 ("curve_blue", Color32::from_rgb(80, 130, 250)),
             ][ch];
-            curve_editor(ui, e, id, false, col, &t, actions, clip, idx);
+            let r = curve_editor(ui, e, id, false, col, &t, actions, clip, idx);
+            auto_rows.push((format!("lumetri.curve.{id}"), r, "Curve"));
             if hdr {
                 let r = slider(ui, e, mt, "curves_hdr_range", tl!("HDR Range"), None, &t, actions, clip, idx);
                 auto_rows.push(("lumetri.param.curves_hdr_range".into(), r, "HDR Range"));
@@ -833,7 +831,8 @@ fn render_single_palette(
                 ("sat_vs_sat", tl!("Sat vs Sat")),
             ] {
                 ui.label(egui::RichText::new(label).color(t.text_dim));
-                curve_editor(ui, e, id, true, Color32::WHITE, &t, actions, clip, idx);
+                let r = curve_editor(ui, e, id, true, Color32::WHITE, &t, actions, clip, idx);
+                auto_rows.push((format!("lumetri.curve.{id}"), r, label));
             }
         }
         "Color Wheels & Match" => {
@@ -1424,7 +1423,8 @@ fn curve_editor(ui: &mut egui::Ui, e: &EffectInstance, id: &str, hue: bool, col:
     let pts: Vec<[f32; 2]> = e.param(id).and_then(|p| p.value.as_curve().map(|c| c.to_vec())).unwrap_or_default();
     // as wide as the panel (it stayed 260 px wide in a wide panel, #1658), not taller than 420 px
     let w = ui.available_width().max(1.0);
-    let h = if hue { w * 0.45 } else { w }.min(420.0);
+    let avail_h = (ui.clip_rect().max.y - ui.cursor().min.y - 12.0).clamp(80.0, 420.0);
+    let h = if hue { (w * 0.45).min(avail_h) } else { w.min(avail_h) };
     let (area, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click_and_drag());
     let p = ui.painter();
     p.rect_filled(area, 2.0, Color32::from_rgb(0x16, 0x16, 0x16));
@@ -1494,11 +1494,8 @@ fn curve_editor(ui: &mut egui::Ui, e: &EffectInstance, id: &str, hue: bool, col:
         && let (Some(i), Some(pos)) = (dragging, resp.interact_pointer_pos())
         && i < new_pts.len()
     {
-        let np = from_screen(pos);
-        if (np[0] - new_pts[i][0]).abs() > 1e-4 || (np[1] - new_pts[i][1]).abs() > 1e-4 {
-            new_pts[i] = np;
-            changed = true;
-        }
+        new_pts[i] = from_screen(pos);
+        changed = true;
     }
     if resp.drag_stopped() {
         dragging = None;

@@ -488,10 +488,10 @@ fn workspace_root(name: &str) -> Node<PanelKind> {
                 tabs(&[LumetriScopes], 0),
             );
             vsplit(
-                Ratio(0.40),
+                Ratio(0.35),
                 top_row,
                 vsplit(
-                    SplitSize::FixedFirst(92.0),
+                    SplitSize::FixedFirst(76.0),
                     tabs(&[ColorClips, Timeline], 0),
                     bottom_row,
                 ),
