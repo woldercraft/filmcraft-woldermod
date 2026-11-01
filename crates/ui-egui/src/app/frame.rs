@@ -13,10 +13,10 @@ impl FilmcraftApp {
             match r {
                 Ok(r) => {
                     if let Some(n) = r["refreshed"].as_array().map(Vec::len).filter(|n| *n > 0) {
-                        self.toast = Some((format!("Refreshed {n} media item(s) changed on disk"), now));
+                        self.status(format!("Refreshed {n} media item(s) changed on disk"));
                     }
                 }
-                Err(e) => self.toast = Some((e.to_string(), now)),
+                Err(e) => self.status(e.to_string()),
             }
         }
         let media = &self.session.prefs.media;
@@ -25,7 +25,7 @@ impl FilmcraftApp {
         let focused = self.native_window_focused.unwrap_or(false);
         let was_focused: bool = ctx.data(|d| d.get_temp(focus_key)).unwrap_or(focused);
         ctx.data_mut(|d| d.insert_temp(focus_key, focused));
-        if !on || filmcraft_engine::media_watch::media_files(&self.session.project, &self.session.media).is_empty() {
+        if !on || !filmcraft_engine::media_watch::has_media_files(&self.session.project) {
             return;
         }
         let last: f64 = ctx.data(|d| d.get_temp(last_key)).unwrap_or(f64::NEG_INFINITY);
@@ -68,6 +68,7 @@ impl FilmcraftApp {
         // the Timeline has had its chance to place a file drop this frame; anything left stays a bin import
         self.pending_timeline_drop = None;
         panels::dialogs::show(self, &ctx);
+        panels::file_dialogs::show_overwrite(self, &ctx);
         updates_ui::show(self, &ctx);
         if !self.ui.show_status_bar {
             return;
@@ -97,8 +98,6 @@ impl FilmcraftApp {
                 }
             }
         }
-
-
         // Center: DaVinci Resolve bottom page navigation (Projects, Edit, Color, Export)
         let nav_items: [(&str, &str, crate::icons::Icon); 4] = [
             ("projects", tl!("Projects"), crate::icons::Icon::Folder),
@@ -110,18 +109,19 @@ impl FilmcraftApp {
         let mut tab_x = (sb.center().x - total_tabs_w / 2.0).max(sb.min.x + 200.0);
         let start_tab_x = tab_x;
 
-        // Left side: transient status / error notifications only (no persistent tool hints)
+        // Left side: transient status / error notifications only (selectable to copy errors, #2295)
+        let resp = ui.interact(sb, egui::Id::unique("status-bar"), egui::Sense::click());
+        if resp.clicked() {
+            self.ui.status.clear();
+        }
         if !self.ui.status.is_empty() {
             let max_w = (start_tab_x - sb.min.x - 20.0).max(100.0);
-            let galley = ui.painter().layout(self.ui.status.clone(), Tokens::ui(11.0), t.text_dim, max_w);
-            let status_rect = egui::Rect::from_min_size(egui::pos2(sb.min.x + 10.0, sb.center().y - galley.size().y / 2.0), galley.size());
-            ui.painter().galley_with_override_text_color(status_rect.min, galley, t.text_dim);
-            let resp = ui.interact(status_rect, egui::Id::unique("status-bar-text"), egui::Sense::click());
-            if resp.clicked() {
-                self.ui.status.clear();
-            }
-
+            let text_rect = egui::Rect::from_min_max(egui::pos2(sb.min.x + 10.0, sb.min.y), egui::pos2(sb.min.x + 10.0 + max_w, sb.max.y));
+            let mut row = ui.new_child(egui::UiBuilder::new().max_rect(text_rect).id_salt("status-text").layout(egui::Layout::left_to_right(egui::Align::Center)));
+            let shown = row.add(egui::Label::new(egui::RichText::new(&self.ui.status).font(Tokens::ui(11.0)).color(t.text_dim)).selectable(true).truncate());
+            self.auto.add("status.text", shown.rect, &self.ui.status);
         }
+
         for (id, label, icon) in nav_items {
             let active = match id {
                 "projects" => self.ui.mode == state::Mode::Import,
@@ -207,10 +207,10 @@ impl FilmcraftApp {
     }
 
     /// Right side of the status bar: the running job (export / render previews) with a progress
-    /// bar and a cancel button.
-    fn job_status(&mut self, ui: &mut egui::Ui, sb: egui::Rect, t: &Tokens) {
+    /// bar and a cancel button. Returns where it starts, if a job is running.
+    fn job_status(&mut self, ui: &mut egui::Ui, sb: egui::Rect, t: &Tokens) -> Option<f32> {
         use std::sync::atomic::Ordering;
-        let Some(job) = self.running_job() else { return };
+        let job = self.running_job()?;
         let f = job.progress.fraction().clamp(0.0, 1.0);
         let left = job.progress.eta().map(panels::left_text).unwrap_or_default();
         let cancel = egui::Rect::from_center_size(egui::pos2(sb.max.x - 14.0, sb.center().y), egui::vec2(14.0, 14.0));
@@ -219,7 +219,7 @@ impl FilmcraftApp {
         p.rect_filled(bar, 3.0, t.separator);
         p.rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * f, bar.height())), 3.0, t.accent);
         let verb = if job.label.starts_with("Rendering") { crate::i18n::t(&job.label).to_string() } else { tl!("Exporting").to_string() };
-        p.text(
+        let progress = p.text(
             egui::pos2(bar.min.x - 8.0, sb.center().y),
             egui::Align2::RIGHT_CENTER,
             format!("{verb}… {:.0}%{left}", f * 100.0),
@@ -237,6 +237,7 @@ impl FilmcraftApp {
             job.progress.cancel.store(true, Ordering::Relaxed);
             self.watched_render = None;
         }
+        Some(progress.min.x)
     }
 
     /// Contextual hint for the status bar (Premiere shows tool/gesture hints here).

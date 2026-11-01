@@ -130,17 +130,17 @@ impl Nv12Stage {
     }
 
     /// Wait for the staging buffer and copy the NV12 bytes out.
-    pub(crate) fn map(&self, device: &wgpu::Device, size: u64, sub: Option<wgpu::SubmissionIndex>) -> Option<Vec<u8>> {
+    pub(crate) fn map(&self, device: &wgpu::Device, size: u64) -> Option<Vec<u8>> {
         let (_, staging, _) = self.buffers.as_ref()?;
         let slice = staging.slice(..size);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        super::wait_mapped(device, sub)?;
-        rx.recv().ok()?.ok()?;
+        super::wait_mapped(device, &rx)?;
         let data = slice.get_mapped_range().ok()?;
-        let out = data.to_vec();
+        let mut out = Vec::with_capacity(size as usize);
+        super::copy_mapped(&data, &mut out);
         drop(data);
         staging.unmap();
         Some(out)
