@@ -3,13 +3,7 @@ name: Windows Build
 on:
   workflow_dispatch:
   push:
-    branches: [release, update-0.16.0]
-    paths:
-      - 'crates/**'
-      - 'apps/**'
-      - 'packaging/windows/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
+    branches: [release, update-0.16.0, main]
 
 jobs:
   windows-package:
