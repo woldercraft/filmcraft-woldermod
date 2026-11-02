@@ -106,6 +106,17 @@ pub enum ColorConversion {
     Cpu,
 }
 
+/// Acceleration buffer / prefetching depth for video export and proxying.
+/// Auto = large prefetch buffer (32–48 frames) to saturate hardware video encoders and keep
+/// decoding pipelines fed continuously without stalling. Off = classic lockstep buffer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RenderBuffer {
+    #[default]
+    Auto,
+    Off,
+}
+
 /// Bitrate encoding of bitrate-driven codecs (H.264).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -72,7 +72,7 @@ use rayon::prelude::*;
 use crate::audio_out::AudioOut;
 use crate::mxf_out::{MxfMux, MxfSetup};
 use crate::pipeline::Pipeline;
-use crate::settings::{AudioCodec, BitrateMode, ColorConversion};
+use crate::settings::{AudioCodec, BitrateMode, ColorConversion, GpuRendering, HardwareEncoding, RenderBuffer};
 use crate::{
     AudioEncoder, ColorSignal, EncodedPacket, EncoderFactory, EncoderFrame, ExportError, ExportSettings, Format, H264Pass, Out, PrepareAhead, Progress, Report,
     Result, Stage, VideoEncoder, audio_factories, export_range, frame_span, note_stage, timed, video_factories,
@@ -322,7 +322,11 @@ impl Exporter {
             f0,
             f1,
             next: f0,
-            batch: rayon::current_num_threads().clamp(2, 16) as i64,
+            batch: if settings.render_buffer == RenderBuffer::Auto && (settings.hardware_encoding == HardwareEncoding::Auto || settings.gpu_rendering == GpuRendering::Auto) {
+                (rayon::current_num_threads() * 3).clamp(16, 48) as i64
+            } else {
+                rayon::current_num_threads().clamp(2, 16) as i64
+            },
             overlap: true,
             budget: if cfg!(test) { IN_FLIGHT_BUDGET } else { IN_FLIGHT_BUDGET * 2 },
             ahead: None,

@@ -821,13 +821,29 @@ impl Default for LinkMediaDraft {
 }
 
 /// Clip ▸ Proxy ▸ Create Proxies….
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProxyDraft {
     pub items: Vec<u64>,
     pub preset: String,
     /// Empty = a Proxies folder next to the original media.
     pub destination: String,
+    #[serde(default = "yes")]
+    pub render_buffer: bool,
+    #[serde(default = "default_concurrency")]
+    pub concurrency: usize,
+}
+
+impl Default for ProxyDraft {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            preset: String::new(),
+            destination: String::new(),
+            render_buffer: true,
+            concurrency: 2,
+        }
+    }
 }
 
 /// File ▸ Project Manager….
@@ -1062,6 +1078,10 @@ fn default_lumetri_bar_pos() -> String {
 
 fn yes() -> bool {
     true
+}
+
+fn default_concurrency() -> usize {
+    2
 }
 
 impl Default for UiState {

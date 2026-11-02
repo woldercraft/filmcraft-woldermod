@@ -78,7 +78,13 @@ pub fn route(app: &mut FilmcraftApp, id: &str, params: &Value) -> Option<Result<
         })),
         "media.createProxies" => Some(enabled(app, id).map(|_| {
             let items = app.session.state.project_selection.iter().map(|i| i.0).collect();
-            app.ui.create_proxies = Some(ProxyDraft { items, preset: filmcraft_engine::proxies::DEFAULT_PROXY_PRESET.into(), destination: String::new() });
+            app.ui.create_proxies = Some(ProxyDraft {
+                items,
+                preset: filmcraft_engine::proxies::DEFAULT_PROXY_PRESET.into(),
+                destination: String::new(),
+                render_buffer: true,
+                concurrency: 2,
+            });
             json!({"dialog": "createProxies"})
         })),
         "media.attachProxies" | "media.reconnectFullRes" => {
@@ -444,6 +450,28 @@ fn create_proxies(app: &mut FilmcraftApp, ctx: &egui::Context) {
                     d.preset = p.id.into();
                 }
             }
+            if d.preset.starts_with("h264") {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("⚡").color(Color32::from_rgb(80, 200, 120)));
+                    ui.label(RichText::new(tl!("Aceleración por GPU activada (Render Vulkan + VA-API/NVENC)")).color(Color32::from_rgb(80, 200, 120)).size(11.5));
+                });
+            }
+            let r = ui.checkbox(&mut d.render_buffer, tl!("Búfer de aceleración y pre-fetching (Recomendado)"));
+            push(&mut elems, "proxies.render_buffer", &r, "render buffer");
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(tl!("Tareas simultáneas:")).strong());
+                let r1 = ui.radio(d.concurrency <= 1, tl!("1 (Secuencial)"));
+                push(&mut elems, "proxies.concurrency.1", &r1, "1 task");
+                if r1.clicked() {
+                    d.concurrency = 1;
+                }
+                let r2 = ui.radio(d.concurrency >= 2, tl!("2 (Paralelo GPU)"));
+                push(&mut elems, "proxies.concurrency.2", &r2, "2 tasks");
+                if r2.clicked() {
+                    d.concurrency = 2;
+                }
+            });
             ui.add_space(4.0);
             ui.label(RichText::new(tl!("Destination")).strong());
             ui.horizontal(|ui| {
@@ -479,7 +507,13 @@ fn create_proxies(app: &mut FilmcraftApp, ctx: &egui::Context) {
         });
     }
     if ok {
-        let p = json!({"items": d.items, "preset": d.preset, "destination": if d.destination.is_empty() { Value::Null } else { json!(d.destination) }});
+        let p = json!({
+            "items": d.items,
+            "preset": d.preset,
+            "destination": if d.destination.is_empty() { Value::Null } else { json!(d.destination) },
+            "renderBuffer": if d.render_buffer { "auto" } else { "off" },
+            "concurrency": d.concurrency,
+        });
         match app.session.execute("media.createProxies", p) {
             Ok(v) => app.ui.status = tlf!("Creating {n} proxy file(s)…", n = v["outputs"].as_array().map_or(0, Vec::len)),
             Err(e) => app.ui.status = e.to_string(),

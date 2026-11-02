@@ -50,6 +50,7 @@ mod format;
 mod output;
 mod registry;
 mod run;
+mod segmented;
 mod stats;
 mod still_encode;
 

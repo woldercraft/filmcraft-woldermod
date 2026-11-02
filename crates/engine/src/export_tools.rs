@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use filmcraft_export::presets::{DEFAULT_PRESET, preset_key};
-use filmcraft_export::{BitrateMode, ExportPreset, ExportSettings, Format, GpuRendering, HardwareEncoding};
+use filmcraft_export::{BitrateMode, ExportPreset, ExportSettings, Format, GpuRendering, HardwareEncoding, RenderBuffer};
 use filmcraft_project::{ItemId, Project};
 use filmcraft_time::{FrameRate, Tick, TimeRange};
 use serde::{Deserialize, Serialize};
@@ -274,6 +274,12 @@ fn apply_flat_overrides(settings: &mut ExportSettings, p: &Value, cmd: &str) -> 
     if let Some(v) = p.get("gpuRendering") {
         settings.gpu_rendering = parse_gpu_rendering(v, cmd)?;
     }
+    if let Some(v) = p.get("renderBuffer") {
+        settings.render_buffer = parse_render_buffer(v, cmd)?;
+    }
+    if let Some(v) = u64_p(p, "segments") {
+        settings.segments = (v as usize).clamp(1, 4);
+    }
     if let Some(v) = bool_p(p, "burnCaptions") {
         settings.burn_captions = v;
     }
@@ -335,6 +341,14 @@ fn parse_gpu_rendering(value: &Value, cmd: &str) -> Result<GpuRendering> {
         Value::Bool(true) => Ok(GpuRendering::Auto),
         Value::Bool(false) => Ok(GpuRendering::Off),
         other => serde_json::from_value(other.clone()).map_err(|_| bad(cmd, "gpuRendering: off | auto")),
+    }
+}
+
+fn parse_render_buffer(value: &Value, cmd: &str) -> Result<RenderBuffer> {
+    match value {
+        Value::Bool(true) => Ok(RenderBuffer::Auto),
+        Value::Bool(false) => Ok(RenderBuffer::Off),
+        other => serde_json::from_value(other.clone()).map_err(|_| bad(cmd, "renderBuffer: off | auto")),
     }
 }
 
@@ -641,6 +655,8 @@ pub struct ExportQueue {
     pub items: Vec<QueueItem>,
     /// Started: ready items are encoded one after another.
     pub running: bool,
+    /// Maximum concurrent exports running on GPU (default 2, or 1 if user chose sequential).
+    pub max_concurrent: usize,
     next_id: u64,
     /// Quick Export's preset (the last one used).
     pub quick_preset: Option<String>,
@@ -717,15 +733,19 @@ pub fn pump_queue(s: &mut Session, wait: bool) {
             }
             finished_any = true;
         }
-        if s.export_queue.items.iter().any(|i| i.status == QueueStatus::Encoding) || !s.export_queue.running {
+        let limit = if s.export_queue.max_concurrent == 0 { 2 } else { s.export_queue.max_concurrent };
+        let active = s.export_queue.items.iter().filter(|i| i.status == QueueStatus::Encoding).count();
+        if active >= limit || !s.export_queue.running {
             return;
         }
         let Some(i) = s.export_queue.items.iter().position(|i| i.status == QueueStatus::Ready) else {
-            s.export_queue.running = false;
-            if finished_any || !wait {
-                let failed = s.export_queue.items.iter().filter(|i| i.status == QueueStatus::Failed).count();
-                let message = if failed > 0 { format!("Export queue finished ({failed} failed)") } else { "Export queue finished".into() };
-                s.events.push(Event::Toast { message, error: failed > 0 });
+            if active == 0 {
+                s.export_queue.running = false;
+                if finished_any || !wait {
+                    let failed = s.export_queue.items.iter().filter(|i| i.status == QueueStatus::Failed).count();
+                    let message = if failed > 0 { format!("Export queue finished ({failed} failed)") } else { "Export queue finished".into() };
+                    s.events.push(Event::Toast { message, error: failed > 0 });
+                }
             }
             return;
         };
@@ -745,6 +765,10 @@ pub fn pump_queue(s: &mut Session, wait: bool) {
             }
         }
         if !wait {
+            let active = s.export_queue.items.iter().filter(|i| i.status == QueueStatus::Encoding).count();
+            if active < limit && s.export_queue.items.iter().any(|i| i.status == QueueStatus::Ready) {
+                continue;
+            }
             return;
         }
     }
@@ -827,16 +851,27 @@ fn queue_list_json(s: &Session) -> Value {
 
 fn queue_list(s: &mut Session, _: &Value) -> Result<Value> {
     pump_queue(s, false);
-    Ok(json!({"running": s.export_queue.running, "items": queue_list_json(s)}))
+    let concurrency = if s.export_queue.max_concurrent == 0 { 2 } else { s.export_queue.max_concurrent };
+    Ok(json!({"running": s.export_queue.running, "items": queue_list_json(s), "concurrency": concurrency}))
 }
 
 fn queue_start(s: &mut Session, p: &Value) -> Result<Value> {
     if !s.export_queue.items.iter().any(|i| matches!(i.status, QueueStatus::Ready | QueueStatus::Encoding)) {
         return Err(bad("export.queue.start", "nothing to export: the queue has no ready items"));
     }
+    if let Some(c) = u64_p(p, "concurrency") {
+        s.export_queue.max_concurrent = (c as usize).clamp(1, 4);
+    }
     s.export_queue.running = true;
     pump_queue(s, bool_p(p, "wait").unwrap_or(false));
-    Ok(json!({"running": s.export_queue.running, "items": queue_list_json(s)}))
+    let concurrency = if s.export_queue.max_concurrent == 0 { 2 } else { s.export_queue.max_concurrent };
+    Ok(json!({"running": s.export_queue.running, "items": queue_list_json(s), "concurrency": concurrency}))
+}
+
+fn queue_set_concurrency(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = u64_p(p, "concurrency").unwrap_or(2).clamp(1, 4) as usize;
+    s.export_queue.max_concurrent = c;
+    Ok(json!({"concurrency": c}))
 }
 
 fn queue_stop(s: &mut Session, _: &Value) -> Result<Value> {
@@ -948,6 +983,15 @@ fn quick(s: &mut Session, p: &Value) -> Result<Value> {
     q["preset"] = json!(name);
     let seq = sequence_param(s, &q, cmd)?;
     let (preset, mut settings) = settings_from_params(s, &q, cmd)?;
+    if q.get("hardwareEncoding").is_none() {
+        settings.hardware_encoding = filmcraft_export::HardwareEncoding::Auto;
+    }
+    if q.get("gpuRendering").is_none() {
+        settings.gpu_rendering = filmcraft_export::GpuRendering::Auto;
+    }
+    if q.get("renderBuffer").is_none() {
+        settings.render_buffer = filmcraft_export::RenderBuffer::Auto;
+    }
     let project = s.project.clone();
     let (range, warnings) = range_with_warnings(s, &project, seq, q.get("range"), &q, cmd)?;
     settings.range = range;
@@ -1204,8 +1248,9 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
             true,
         ),
         spec("export.queue.list", "List Export Queue", "{}", always, queue_list, false),
-        spec("export.queue.start", "Start Export Queue", r#"{"wait":bool=false}"#, always, queue_start, true),
+        spec("export.queue.start", "Start Export Queue", r#"{"wait":bool=false,"concurrency":int?}"#, always, queue_start, true),
         spec("export.queue.stop", "Stop Export Queue", "{}", always, queue_stop, true),
+        spec("export.queue.setConcurrency", "Set Export Queue Concurrency", r#"{"concurrency":int}"#, always, queue_set_concurrency, false),
         spec("export.queue.cancel", "Cancel Queued Export", r#"{"id":id?,"wait":bool?}"#, always, queue_cancel, true),
         spec("export.queue.retry", "Retry Queued Export", r#"{"id":id,"start":bool?,"wait":bool?}"#, always, queue_retry, true),
         spec("export.queue.remove", "Remove Queued Export", r#"{"id":id}"#, always, queue_remove, true),

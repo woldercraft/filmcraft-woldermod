@@ -1991,7 +1991,7 @@ mod frame_hold_tests {
         for i in 0..3 {
             app.auto.begin_frame();
             let mut out = ctx.run_ui(egui::RawInput { time: Some(f64::from(i) * 0.1), ..Default::default() }, |ui| match panel {
-                Panel::Lumetri => crate::panels::lumetri::show(&mut app, ui, Rect::from_min_size(pos2(0.0, 0.0), vec2(360.0, 900.0))),
+                Panel::Lumetri => crate::panels::lumetri::show(&mut app, ui, Rect::from_min_size(pos2(0.0, 0.0), vec2(360.0, 900.0)), crate::dock::PanelKind::LumetriColor),
                 Panel::Masks => crate::panels::masks::monitor_overlay(&mut app, ui, pic, frame),
                 Panel::TransformHandles => crate::panels::transform_handles::monitor_overlay(&mut app, ui, pic, frame),
                 Panel::AudioFxEditor => crate::panels::audio_fx_editor::show(&mut app, ui.ctx()),

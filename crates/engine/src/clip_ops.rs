@@ -333,6 +333,7 @@ pub(crate) fn apply_layout(v: &mut Vec<CommandSpec>) {
                 "clip.fitToFrame",
                 "clip.fillFrame",
                 "clip.audioGain",
+                "clip.removeSilence",
                 "clip.breakoutToMono",
                 "clip.extractAudio",
             ],

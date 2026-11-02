@@ -694,6 +694,43 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
             }
         });
     }
+    row(ui, t, tl!("Pipeline Buffer"), |ui| {
+        let options = [
+            ("Auto (Pre-fetching + Búfer amplio GPU)", filmcraft_export::RenderBuffer::Auto),
+            ("Off (Búfer clásico)", filmcraft_export::RenderBuffer::Off),
+        ];
+        let cur = if s.render_buffer == filmcraft_export::RenderBuffer::Auto { options[0].0 } else { options[1].0 };
+        let labels: Vec<(String, bool)> = options.iter().map(|(l, _)| (l.to_string(), true)).collect();
+        if let Some(i) = combo(ui, reg, "export.video.renderBuffer", cur, &labels, 260.0) {
+            s.render_buffer = options[i].1;
+        }
+    });
+    row(ui, t, tl!("Segmented Export"), |ui| {
+        let options = [
+            ("Desactivado (1 archivo secuencial)", 1usize),
+            ("2 partes en paralelo (GPU Acelerado)", 2usize),
+            ("3 partes en paralelo", 3usize),
+            ("4 partes en paralelo", 4usize),
+        ];
+        let cur = match s.segments {
+            2 => options[1].0,
+            3 => options[2].0,
+            4 => options[3].0,
+            _ => options[0].0,
+        };
+        let labels: Vec<(String, bool)> = options.iter().map(|(l, _)| (l.to_string(), true)).collect();
+        if let Some(i) = combo(ui, reg, "export.video.segments", cur, &labels, 260.0) {
+            s.segments = options[i].1;
+        }
+    });
+    row(ui, t, "", |ui| {
+        let (msg, col) = if s.segments > 1 {
+            (format!("🚀 Divide el video en {} partes simultáneas en GPU y las une al finalizar", s.segments), t.accent)
+        } else {
+            ("Exportación continua en un solo proceso".to_string(), t.text_dim)
+        };
+        ui.label(egui::RichText::new(msg).size(11.0).color(col));
+    });
     row(ui, t, "", |ui| check(ui, reg, "export.video.maxDepth", &mut s.render_at_max_depth, tl!("Render at Maximum Depth")));
     row(ui, t, "", |ui| check(ui, reg, "export.video.maxQuality", &mut s.max_render_quality, tl!("Use Maximum Render Quality")));
 }

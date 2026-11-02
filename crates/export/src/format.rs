@@ -2,7 +2,7 @@ use super::output::OutputSink;
 use super::run::validate_range;
 use super::{
     Arc, AudioCodec, AudioSettings, BitrateMode, ColorConversion, Deserialize, ExportEffects, ExportError, ExportMetadata, ExrCompression, FieldOrder, FrameRate, GpuRendering,
-    H264Profile, HardwareEncoding, Multiplexer, MxfVideoCodec, Result, SampleEntry, Scaling, Serialize, Tick, TimeRange,
+    H264Profile, HardwareEncoding, Multiplexer, MxfVideoCodec, RenderBuffer, Result, SampleEntry, Scaling, Serialize, Tick, TimeRange,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -335,6 +335,12 @@ pub struct ExportSettings {
     /// Auto converts on the GPU when the encoder can take NV12 (the fastest route).
     #[serde(default)]
     pub color_conversion: ColorConversion,
+    /// Acceleration buffer / prefetching depth for video export (Auto / Off).
+    #[serde(default)]
+    pub render_buffer: RenderBuffer,
+    /// Segmented parallel export chunks (1 = single file direct / off, 2..4 = parallel chunks).
+    #[serde(default = "default_segments")]
+    pub segments: usize,
     /// VBR maximum bitrate (None = 1.5 × target).
     pub max_bitrate_kbps: Option<u32>,
     /// Adaptive bitrate (the Match Source presets): bits per pixel per frame; replaces
@@ -452,6 +458,8 @@ impl Default for ExportSettings {
             hardware_encoding: HardwareEncoding::default(),
             gpu_rendering: GpuRendering::Off,
             color_conversion: ColorConversion::Auto,
+            render_buffer: RenderBuffer::Auto,
+            segments: 1,
             max_bitrate_kbps: None,
             adaptive_bitrate: None,
             keyframe_distance: None,
@@ -475,6 +483,10 @@ pub const DEFAULT_CRF: f32 = 23.0;
 
 fn default_crf() -> f32 {
     DEFAULT_CRF
+}
+
+fn default_segments() -> usize {
+    1
 }
 
 impl ExportSettings {

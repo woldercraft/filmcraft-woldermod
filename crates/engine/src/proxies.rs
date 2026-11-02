@@ -12,10 +12,11 @@
 //! - **Ingest.** With ingest enabled, `file.import` copies (verified by fingerprint), transcodes
 //!   and/or creates proxies.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use filmcraft_export::{ExportSettings, Format, Progress, Report};
+use filmcraft_export::{ColorConversion, ExportSettings, Format, GpuRendering, HardwareEncoding, Progress, RenderBuffer, Report};
 use filmcraft_media::{MediaKind, SharedSource};
 use filmcraft_project::{IngestAction, ItemId, ItemKind, MediaClip, MediaRef, Project, SequenceSettings, TrackKind};
 use filmcraft_time::{Tick, TimeRange};
@@ -97,7 +98,7 @@ pub fn transcode(
     preset: &Preset,
     progress: &Progress,
 ) -> std::result::Result<Report, String> {
-    transcode_with_file(clip, name, src, range, Dest { path: out, file: None }, preset, progress)
+    transcode_with_file(clip, name, src, range, Dest { path: out, file: None }, preset, RenderBuffer::Auto, progress)
 }
 
 /// Output path, plus the already-open file to write into when the caller holds one.
@@ -113,6 +114,7 @@ fn transcode_with_file(
     range: Option<TimeRange>,
     dest: Dest<'_>,
     preset: &Preset,
+    render_buffer: RenderBuffer,
     progress: &Progress,
 ) -> std::result::Result<Report, String> {
     let Dest { path: out, file: output_file } = dest;
@@ -160,6 +162,10 @@ fn transcode_with_file(
         part_of_batch: true,
         prores_profile: preset.prores.to_string(),
         output_file,
+        hardware_encoding: HardwareEncoding::Auto,
+        gpu_rendering: GpuRendering::Auto,
+        color_conversion: ColorConversion::Auto,
+        render_buffer,
         ..Default::default()
     };
     let project = Arc::new(p);
@@ -257,7 +263,15 @@ fn items_param(s: &Session, p: &Value) -> Vec<ItemId> {
 }
 
 /// Start a background transcode job over `work` (item, output path, preset). Returns the job id.
-fn start_job(s: &mut Session, label: String, work: Vec<(ItemId, ReservedOutput, &'static Preset)>, on_done: OnDone, wait: bool) -> Result<u64> {
+fn start_job(
+    s: &mut Session,
+    label: String,
+    work: Vec<(ItemId, ReservedOutput, &'static Preset)>,
+    on_done: OnDone,
+    wait: bool,
+    render_buffer: RenderBuffer,
+    concurrency: usize,
+) -> Result<u64> {
     let mut tasks = Vec::new();
     let mut total = 0;
     for (item, output, pr) in work {
@@ -290,31 +304,62 @@ fn start_job(s: &mut Session, label: String, work: Vec<(ItemId, ReservedOutput, 
         #[cfg(not(target_arch = "wasm32"))]
         ticket.wait(&prog.cancel);
         let t0 = web_time::Instant::now();
-        let mut bytes = 0;
-        let mut err = None;
         let n = tasks.len();
-        for (k, (item, clip, name, src, mut output, pr)) in tasks.into_iter().enumerate() {
-            if prog.cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                err = Some("cancelled".to_string());
-                break;
+        let workers = if cfg!(target_arch = "wasm32") { 1 } else { concurrency.min(n).clamp(1, 4) };
+        let queue = Arc::new(Mutex::new(tasks.into_iter().enumerate().collect::<VecDeque<_>>()));
+        let err: Arc<Mutex<Option<String>>> = Arc::default();
+        let total_bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                let queue = queue.clone();
+                let err = err.clone();
+                let total_bytes = total_bytes.clone();
+                let prog = &prog;
+                let pool = &pool;
+                let project = &project;
+                let services = &services;
+                let outs = &outs;
+                scope.spawn(move || {
+                    loop {
+                        if prog.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                            let mut e = err.lock().unwrap_or_else(|e| e.into_inner());
+                            if e.is_none() {
+                                *e = Some("cancelled".to_string());
+                            }
+                            break;
+                        }
+                        if err.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+                            break;
+                        }
+                        let next = queue.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
+                        let Some((k, (item, clip, name, src, mut output, pr))) = next else { break };
+
+                        *prog.status.lock().unwrap_or_else(|e| e.into_inner()) = format!("{name} ({} of {n})", k + 1);
+                        let out = output.path().to_string_lossy().into_owned();
+                        // its own copy of the file, opened here rather than on the main thread, so the
+                        // monitors keep their decoder
+                        let src = pool.own_source(project, item, &**services).unwrap_or(src);
+                        match transcode_with_file(&clip, &name, src, None, Dest { path: &out, file: output.file() }, pr, render_buffer, prog) {
+                            Ok(r) => {
+                                total_bytes.fetch_add(r.bytes, std::sync::atomic::Ordering::Relaxed);
+                                output.preserve();
+                                outs.lock().unwrap_or_else(|e| e.into_inner()).push((item, out));
+                            }
+                            Err(e) => {
+                                let mut er = err.lock().unwrap_or_else(|e| e.into_inner());
+                                if er.is_none() {
+                                    *er = Some(format!("{name}: {e}"));
+                                }
+                                break;
+                            }
+                        }
+                    }
+                });
             }
-            *prog.status.lock().unwrap_or_else(|e| e.into_inner()) = format!("{name} ({} of {n})", k + 1);
-            let out = output.path().to_string_lossy().into_owned();
-            // its own copy of the file, opened here rather than on the main thread, so the
-            // monitors keep their decoder
-            let src = pool.own_source(&project, item, &*services).unwrap_or(src);
-            match transcode_with_file(&clip, &name, src, None, Dest { path: &out, file: output.file() }, pr, &prog) {
-                Ok(r) => {
-                    bytes += r.bytes;
-                    output.preserve();
-                    outs.lock().unwrap_or_else(|e| e.into_inner()).push((item, out));
-                }
-                Err(e) => {
-                    err = Some(format!("{name}: {e}"));
-                    break;
-                }
-            }
-        }
+        });
+        let bytes = total_bytes.load(std::sync::atomic::Ordering::Relaxed);
+        let err = err.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let secs = t0.elapsed().as_secs_f64();
         let frames = prog.done.load(std::sync::atomic::Ordering::Relaxed);
         let r = match err {
@@ -471,7 +516,13 @@ pub fn create(s: &mut Session, p: &Value) -> Result<Value> {
     let n = work.len();
     let label = format!("Create Proxies ({n} clip{})", if n == 1 { "" } else { "s" });
     let attach = bool_p(p, "attach").unwrap_or(true);
-    let job = start_job(s, label, work, if attach { OnDone::AttachProxies } else { OnDone::Nothing }, bool_p(p, "wait").unwrap_or(false))?;
+    let render_buffer = match p.get("renderBuffer") {
+        Some(Value::Bool(false)) => RenderBuffer::Off,
+        Some(Value::String(s)) if s == "off" => RenderBuffer::Off,
+        _ => RenderBuffer::Auto,
+    };
+    let concurrency = u64_p(p, "concurrency").map(|c| (c as usize).clamp(1, 4)).unwrap_or(2);
+    let job = start_job(s, label, work, if attach { OnDone::AttachProxies } else { OnDone::Nothing }, bool_p(p, "wait").unwrap_or(false), render_buffer, concurrency)?;
     Ok(json!({"job": job, "preset": pr.id, "outputs": outputs, "skipped": skipped}))
 }
 
@@ -587,7 +638,7 @@ pub fn ingest(s: &mut Session, items: &[ItemId]) -> Result<Value> {
                 work.push((i, output, pr));
             }
             if !work.is_empty() {
-                let id = start_job(s, format!("Ingest: transcode {} clip(s)", work.len()), work, OnDone::ReplaceMedia, false)?;
+                let id = start_job(s, format!("Ingest: transcode {} clip(s)", work.len()), work, OnDone::ReplaceMedia, false, RenderBuffer::Auto, 2)?;
                 job = json!({"job": id});
             }
         }
@@ -603,7 +654,7 @@ pub fn commands() -> Vec<CommandSpec> {
             label: "Create Proxies…",
             menu: &["Clip", "Proxy"],
             shortcut: None,
-            params: r#"{"items":[id]?,"preset":"prores_proxy_quarter|prores_proxy_half|prores_lt_half|h264_quarter|h264_half"?,"destination":str?,"attach":bool=true,"wait":bool=false}"#,
+            params: r#"{"items":[id]?,"preset":"prores_proxy_quarter|prores_proxy_half|prores_lt_half|h264_quarter|h264_half"?,"destination":str?,"attach":bool=true,"wait":bool=false,"renderBuffer":"auto|off"?,"concurrency":int?}"#,
             enabled: has_file_media,
             run: create,
             journal: true,

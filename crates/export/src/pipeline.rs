@@ -184,7 +184,16 @@ impl Pipeline {
     /// Keep the immutable capacity even after a failed renderer retires the pool.
     pub(crate) fn render_batch_limit(&self, requested: i64) -> i64 {
         let requested = requested.max(1);
-        self.renderer.as_ref().map_or(requested, |pool| requested.min(i64::try_from(pool.capacity).unwrap_or(i64::MAX)))
+        self.renderer.as_ref().map_or(requested, |pool| {
+            if pool.supports_plan {
+                // When pre-planning / decoding runs before the parallel render pass,
+                // frame workers never execute nested joins that could starve the pool,
+                // so the batch can scale up to the requested pre-fetch depth.
+                requested
+            } else {
+                requested.min(i64::try_from(pool.capacity).unwrap_or(i64::MAX))
+            }
+        })
     }
 
     pub fn new(project: Arc<Project>, seq: ItemId, settings: &ExportSettings, hdr_out: bool) -> Result<Self> {

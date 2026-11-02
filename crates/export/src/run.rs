@@ -69,6 +69,9 @@ fn capped_pool(max_threads: u32) -> Option<rayon::ThreadPool> {
 /// Run an export (blocking; call from a worker thread). With `settings.max_threads` set it runs on
 /// a pool of that many threads, so its rendering and software encoding use at most that many cores.
 pub fn export(project: &Arc<Project>, seq: ItemId, settings: &ExportSettings, sources: &dyn SourceProvider, progress: &Progress) -> Result<Report> {
+    if settings.segments > 1 && !settings.part_of_batch && crate::segmented::is_segmentable(settings) {
+        return crate::segmented::segmented_export(project, seq, settings, sources, progress);
+    }
     match capped_pool(settings.max_threads) {
         Some(pool) => pool.install(|| export_here(project, seq, settings, sources, progress)),
         None => export_here(project, seq, settings, sources, progress),
@@ -76,7 +79,7 @@ pub fn export(project: &Arc<Project>, seq: ItemId, settings: &ExportSettings, so
 }
 
 /// [`export`] on the threads it is called from.
-fn export_here(project: &Arc<Project>, seq: ItemId, settings: &ExportSettings, sources: &dyn SourceProvider, progress: &Progress) -> Result<Report> {
+pub(crate) fn export_here(project: &Arc<Project>, seq: ItemId, settings: &ExportSettings, sources: &dyn SourceProvider, progress: &Progress) -> Result<Report> {
     settings.validate()?;
     if stepped(settings.format) {
         let mut ex = Exporter::new(project.clone(), seq, settings, progress)?;

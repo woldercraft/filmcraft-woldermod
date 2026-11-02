@@ -16,9 +16,18 @@ pub(super) fn queue_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect
     let qtop = mf.max.y + 18.0;
     let n = app.session.export_queue.items.len();
     p.text(pos2(rect.min.x + 14.0, qtop), Align2::LEFT_CENTER, tlf!("Queue ({n})", n), Tokens::semibold(13.0), t.text);
+    let mut action: Option<(&'static str, Value)> = None;
+    let curr_c = if app.session.export_queue.max_concurrent == 0 { 2 } else { app.session.export_queue.max_concurrent };
+    let c_rect = Rect::from_min_max(pos2(rect.max.x - 120.0, qtop - 10.0), pos2(rect.max.x - 8.0, qtop + 10.0));
+    let mut cu = ui.new_child(egui::UiBuilder::new().max_rect(c_rect).layout(egui::Layout::right_to_left(egui::Align::Center)));
+    if cu.selectable_label(curr_c == 2, "2 GPU").on_hover_text(tl!("2 exportaciones en paralelo (Aceleración GPU)")).clicked() {
+        action = Some(("export.queue.setConcurrency", json!({"concurrency": 2})));
+    }
+    if cu.selectable_label(curr_c == 1, "1").on_hover_text(tl!("1 exportación a la vez (Secuencial)")).clicked() {
+        action = Some(("export.queue.setConcurrency", json!({"concurrency": 1})));
+    }
     let body = Rect::from_min_max(pos2(rect.min.x + 8.0, qtop + 14.0), pos2(rect.max.x - 8.0, rect.max.y - 40.0));
     let items: Vec<Value> = app.session.execute("export.queue.list", json!({})).ok().and_then(|v| v["items"].as_array().cloned()).unwrap_or_default();
-    let mut action: Option<(&'static str, Value)> = None;
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body).id_salt("export-queue"));
     egui::ScrollArea::vertical().id_salt("export-queue-scroll").auto_shrink([false, false]).show(&mut child, |ui| {
         if items.is_empty() {
