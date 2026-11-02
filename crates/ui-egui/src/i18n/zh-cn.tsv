@@ -3698,3 +3698,16 @@
 	Previous	上一个
 	Next	下一个
 	Enter a valid HH:MM:SS:FF timecode	请输入有效的 HH:MM:SS:FF 时间码
+	Remove Silence…	消除静音…
+	Remove Silence	消除静音
+	Threshold:	阈值：
+	Pre head:	前置缓冲：
+	Post tail:	后置缓冲：
+	Minimum to strip:	最小消除长度：
+	No silence found matching the criteria	未找到符合条件的静音
+	Preview:	预览：
+	Visible area	可见区域
+	Entire clip	整个剪辑
+	Entire sequence	整个序列
+	{count} silences detected ({sec}s)	检测到 {count} 处静音 ({sec}秒)
+	Detecting silences…	正在检测静音…

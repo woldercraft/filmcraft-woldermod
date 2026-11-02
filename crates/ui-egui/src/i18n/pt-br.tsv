@@ -3672,3 +3672,16 @@
 	Previous	Anterior
 	Next	Próximo
 	Enter a valid HH:MM:SS:FF timecode	Digite um timecode válido HH:MM:SS:FF
+	Remove Silence…	Remover silêncio…
+	Remove Silence	Remover silêncio
+	Threshold:	Limite:
+	Pre head:	Margem inicial:
+	Post tail:	Margem final:
+	Minimum to strip:	Silencio mínimo a remover:
+	No silence found matching the criteria	Nenhum silêncio encontrado correspondente aos critérios
+	Preview:	Pré-visualização:
+	Visible area	Área visível
+	Entire clip	Clipe inteiro
+	Entire sequence	Sequência inteira
+	{count} silences detected ({sec}s)	{count} silêncios detectados ({sec}s)
+	Detecting silences…	Detectando silêncios…

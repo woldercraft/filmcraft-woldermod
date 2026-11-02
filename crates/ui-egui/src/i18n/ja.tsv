@@ -3731,3 +3731,16 @@
 	Previous	前へ
 	Next	次へ
 	Enter a valid HH:MM:SS:FF timecode	有効なタイムコードを HH:MM:SS:FF 形式で入力してください
+	Remove Silence…	無音を削除…
+	Remove Silence	無音を削除
+	Threshold:	しきい値:
+	Pre head:	先頭マージン:
+	Post tail:	末尾マージン:
+	Minimum to strip:	削除する最小無音長:
+	No silence found matching the criteria	条件に一致する無音は見つかりませんでした
+	Preview:	プレビュー:
+	Visible area	表示領域
+	Entire clip	クリップ全体
+	Entire sequence	シーケンス全体
+	{count} silences detected ({sec}s)	{count} 件の無音を検出 ({sec}秒)
+	Detecting silences…	無音を検出中…

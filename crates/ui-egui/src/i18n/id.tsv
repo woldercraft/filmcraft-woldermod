@@ -3669,3 +3669,16 @@
 	Previous	Sebelumnya
 	Next	Berikutnya
 	Enter a valid HH:MM:SS:FF timecode	Masukkan kode waktu HH:MM:SS:FF yang valid
+	Remove Silence…	Hapus Keheningan…
+	Remove Silence	Hapus Keheningan
+	Threshold:	Ambang batas:
+	Pre head:	Batas awal:
+	Post tail:	Batas akhir:
+	Minimum to strip:	Minimum keheningan dipotong:
+	No silence found matching the criteria	Tidak ada keheningan yang cocok dengan kriteria
+	Preview:	Pratinjau:
+	Visible area	Area yang terlihat
+	Entire clip	Seluruh klip
+	Entire sequence	Seluruh sekuens
+	{count} silences detected ({sec}s)	{count} keheningan terdeteksi ({sec}s)
+	Detecting silences…	Mendeteksi keheningan…

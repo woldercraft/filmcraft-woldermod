@@ -3695,3 +3695,16 @@
 	Previous	Precedente
 	Next	Successivo
 	Enter a valid HH:MM:SS:FF timecode	Inserisci un timecode valido HH:MM:SS:FF
+	Remove Silence…	Rimuovi silenzio…
+	Remove Silence	Rimuovi silenzio
+	Threshold:	Soglia:
+	Pre head:	Margine iniziale:
+	Post tail:	Margine finale:
+	Minimum to strip:	Minimo da rimuovere:
+	Preview:	Anteprima:
+	Visible area	Area visibile
+	Entire clip	Intera clip
+	Entire sequence	Intera sequenza
+	{count} silences detected ({sec}s)	{count} silenzi rilevati ({sec}s)
+	Detecting silences…	Rilevamento silenzi…
+	No silence found matching the criteria	Nessun silenzio trovato corrispondente ai criteri

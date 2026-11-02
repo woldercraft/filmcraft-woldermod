@@ -2527,7 +2527,7 @@ fn build() -> Vec<CommandSpec> {
             "Remove Silence…",
             ["Clip", "Audio Options"],
             None,
-            r#"{"threshold":f?,"preHead":n?,"postTail":n?,"minStrip":n?,"crossfade":bool?,"clips":[id]?}"#,
+            r#"{"threshold":f?,"preHead":n?,"postTail":n?,"minStrip":n?,"clips":[id]?}"#,
             has_selection,
             |s, p| {
                 let mut p = p.clone();

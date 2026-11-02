@@ -3725,3 +3725,16 @@
 	Options:	Options :
 	Invalid duration: {error}	Durée non valide : {error}
 # Control server: the bind-failure notice (port collisions; #3318 may show it too).
+	Remove Silence…	Supprimer les silences…
+	Remove Silence	Supprimer les silences
+	Threshold:	Seuil :
+	Pre head:	Marge début :
+	Post tail:	Marge fin :
+	Minimum to strip:	Silence minimal à couper :
+	No silence found matching the criteria	Aucun silence correspondant aux critères n'a été trouvé
+	Preview:	Aperçu :
+	Visible area	Zone visible
+	Entire clip	Clip entier
+	Entire sequence	Séquence entière
+	{count} silences detected ({sec}s)	{count} silences détectés ({sec}s)
+	Detecting silences…	Détection des silences…
