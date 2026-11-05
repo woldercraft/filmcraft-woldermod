@@ -284,7 +284,7 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
         if project.is_none() && media.is_empty() && !startup_flag && app.session.prefs.general.at_startup == "showHome" {
             app.ui.mode = filmcraft_ui_egui::state::Mode::Import;
         }
-        app.set_startup_update_check(true);
+        app.set_startup_update_check(false);
         app.graphics_notice = notice;
         if recover == Some(false) {
             app.dialog = None;

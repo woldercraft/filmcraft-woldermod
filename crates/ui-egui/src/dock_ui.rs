@@ -202,8 +202,6 @@ impl FilmcraftApp {
             log::warn!("could not bring the Program monitor to the front: {error}");
         }
     }
-        }
-    }
 
     fn apply_dock_all(&mut self, actions: Vec<Action<PanelKind>>) -> Result<(), String> {
         let mut layout = self.ui.dock.clone();

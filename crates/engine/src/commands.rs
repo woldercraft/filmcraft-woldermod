@@ -501,52 +501,6 @@ fn move_clips(s: &mut Session, p: &Value) -> Result<Value> {
             listed.push((clip, track, time, new_track));
         }
     }
-        } else {
-            s.state.selection.clone()
-        };
-<<<<<<< HEAD
-        let item_map: std::collections::HashMap<ClipId, (TrackId, Tick)> =
-            q.all_tracks().flat_map(|t| t.items.iter().map(move |i| (i.id, (t.id, i.start)))).collect();
-        for c in clips_to_move {
-            if let Some(&(tid, start)) = item_map.get(&c) {
-                if q.track(tid).is_some_and(|t| t.locked) {
-                    continue;
-                }
-                let dest_track = shift_seq_track(q, tid, track_delta);
-                listed.push((c, dest_track, (start + offset).max(Tick::ZERO), false));
-            }
-        }
-    } else {
-        for m in p.get("moves").and_then(Value::as_array).into_iter().flatten() {
-            let new_track = str_p(m, "track").is_some_and(|t| t.eq_ignore_ascii_case("new"));
-            let track = if new_track {
-                let clip = clip_p(m, "clip").ok_or_else(|| bad(CMD, "new track needs a clip"))?;
-                let q = s.active_sequence().ok_or(EngineError::NoSequence)?;
-                let (source, _) = q.find_item(clip).ok_or(edit::EditError::NoItem(clip))?;
-                if q.track(source).is_some_and(|t| t.locked) {
-                    return Err(edit::EditError::Locked.into());
-                }
-                if m.get("time").and_then(Value::as_i64).is_none() {
-                    return Err(bad(CMD, "new track needs a time"));
-                }
-                Some(source)
-            } else {
-                track_p(s, m, "track", CMD)?
-            };
-            if let (Some(clip), Some(track), Some(time)) = (clip_p(m, "clip"), track, m.get("time").and_then(Value::as_i64)) {
-                listed.push((clip, track, Tick(time), new_track));
-            }
-        }
-=======
-        // an entry the move cannot use is refused, never skipped: skipping it moved the rest of
-        // the list, or failed with "need `moves`" when it was the only entry
-        let needs = |what: &str| bad(CMD, format!("`moves[{i}]` needs {what}"));
-        let clip = clip_p(m, "clip").ok_or_else(|| needs("`clip`"))?;
-        let track = track.ok_or_else(|| needs("`track`"))?;
-        let time = time.ok_or_else(|| needs("`time`: ticks or a time object like {\"seconds\": n}, {\"frame\": n} or {\"timecode\": \"…\"}"))?;
-        listed.push((clip, track, time, new_track));
->>>>>>> upstream-0.17.1
-    }
     if listed.is_empty() {
         return Err(bad(CMD, "need `moves` or non-empty `offset`"));
     }
