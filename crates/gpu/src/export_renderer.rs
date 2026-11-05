@@ -426,9 +426,9 @@ mod tests {
             for f in [20, 24, 27] {
                 let t = rate.tick_of(f);
                 assert!(!filmcraft_render::plan::is_cpu_frame(&p, seq, t), "{id} takes a GPU renderer");
-                let before = r.compositor.gpu_transitions;
+                let before = r.compositor.as_ref().unwrap().gpu_transitions;
                 let gpu = r.render(&p, seq, t, opts, &m).expect("GPU transition frame");
-                assert_eq!(r.compositor.gpu_transitions, before + 1, "{id}: drawn on the GPU");
+                assert_eq!(r.compositor.as_ref().unwrap().gpu_transitions, before + 1, "{id}: drawn on the GPU");
                 assert_parity(&filmcraft_render::render_sequence(&p, seq, t, opts, &m), &gpu, &format!("{id} reverse={reverse} frame {f}"));
             }
         }
