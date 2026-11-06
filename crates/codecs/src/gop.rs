@@ -818,6 +818,7 @@ impl GopCache {
             return Err(CodecError::Decode("no video decoder".into()));
         };
         decoder.set_draft(draft);
+        decoder.set_skip_before(late);
         while st.next < limit {
             if filmcraft_media::cancel::cancelled() {
                 // The decoder state stays consistent (`next`, `out_max`): a later request continues.

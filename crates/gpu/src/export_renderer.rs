@@ -152,7 +152,7 @@ impl Drop for ExportRenderer {
             }
             if !device_failed()
                 && let Ok(mut idle) = st.idle_compositors.lock()
-                && idle.len() < 16
+                && idle.len() < 4
             {
                 idle.push(comp);
             }

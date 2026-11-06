@@ -87,6 +87,38 @@ pub const INTERLEAVE: i64 = 16;
 /// the one being rendered), see [`overlap_batch`].
 pub const IN_FLIGHT_BUDGET: u64 = 1 << 29;
 
+/// Calculate safe in-flight frame budget based on available system memory (Linux `/proc/meminfo`).
+/// Prevents triggering systemd-oomd "Memory shortage avoided" notifications during heavy exports.
+fn safe_in_flight_budget() -> u64 {
+    if cfg!(test) {
+        return IN_FLIGHT_BUDGET;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(content) = std::fs::read_to_string("/proc/meminfo") {
+            let mut mem_available = 0u64;
+            for line in content.lines() {
+                if let Some(rest) = line.strip_prefix("MemAvailable:") {
+                    if let Ok(kb) = rest.trim().trim_end_matches("kB").trim().parse::<u64>() {
+                        mem_available = kb;
+                        break;
+                    }
+                }
+            }
+            if mem_available > 0 {
+                if mem_available < 2_000_000 {
+                    // Under 2 GB available RAM: tight budget (128 MiB)
+                    return 128 << 20;
+                } else if mem_available < 4_000_000 {
+                    // Under 4 GB available RAM: moderate budget (256 MiB)
+                    return 256 << 20;
+                }
+            }
+        }
+    }
+    IN_FLIGHT_BUDGET
+}
+
 /// One rendered picture: straight RGBA8, or for HDR exports the encoded R'G'B' floats.
 type Frame = (Vec<u8>, Vec<f32>);
 
@@ -323,12 +355,14 @@ impl Exporter {
             f1,
             next: f0,
             batch: if settings.render_buffer == RenderBuffer::Auto && (settings.hardware_encoding == HardwareEncoding::Auto || settings.gpu_rendering == GpuRendering::Auto) {
-                (rayon::current_num_threads() * 3).clamp(16, 48) as i64
+                // Optimal batch: saturate hardware encoder & GPU pipelines (4-12 frames)
+                // without hoarding tens of uncompressed raw frames in memory.
+                (rayon::current_num_threads()).clamp(4, 12) as i64
             } else {
-                rayon::current_num_threads().clamp(2, 16) as i64
+                rayon::current_num_threads().clamp(2, 8) as i64
             },
             overlap: true,
-            budget: if cfg!(test) { IN_FLIGHT_BUDGET } else { IN_FLIGHT_BUDGET * 2 },
+            budget: safe_in_flight_budget(),
             ahead: None,
             overlapped_steps: 0,
             brand,
@@ -609,6 +643,11 @@ impl Exporter {
                 Encoded::Done => {
                     progress.done.fetch_add((end - f) as u64, Ordering::Relaxed);
                     self.next = end;
+                    if !self.settings.part_of_batch {
+                        filmcraft_codecs::release_idle();
+                        filmcraft_frame::pool::trim_f32();
+                        filmcraft_frame::pool::trim_planes();
+                    }
                     Ok(Step::Progress)
                 }
             };
@@ -639,6 +678,13 @@ impl Exporter {
                     // a source was not ready: the next step renders this batch again
                     Some(Ok(None)) | None => {}
                     Some(Err(_)) => return Err(ExportError::Encode("internal error while rendering a frame (the panic was logged by the panic hook)".into())),
+                }
+                // Periodic memory hygiene: evict completed source decoders and free idle frame shelves
+                // so long timeline exports across multiple video files don't accumulate gigabytes of RAM.
+                if !self.settings.part_of_batch {
+                    filmcraft_codecs::release_idle();
+                    filmcraft_frame::pool::trim_f32();
+                    filmcraft_frame::pool::trim_planes();
                 }
                 Ok(Step::Progress)
             }

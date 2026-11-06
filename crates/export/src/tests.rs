@@ -451,7 +451,7 @@ fn gpu_hook_scenarios() {
         );
     }
     // at most one panic per pooled renderer: none is used again after it panicked
-    let max_pool = rayon::current_num_threads().clamp(4, 16);
+    let max_pool = rayon::current_num_threads().clamp(2, 4);
     assert!(PANICS.load(std::sync::atomic::Ordering::SeqCst) <= max_pool, "renderer reused after a panic: {}", PANICS.load(std::sync::atomic::Ordering::SeqCst));
 
     // 5. A frame the planner hands back as one CPU image (an adjustment layer over the clip from

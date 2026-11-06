@@ -1467,5 +1467,10 @@ mod source_placement_tests;
 
 #[cfg(test)]
 mod frame_export_tests;
+/// Free the decoded frames and decoders of every idle source cache across the entire process.
+pub fn trim_idle() {
+    filmcraft_codecs::release_idle();
+}
+
 #[cfg(test)]
 mod wasm_clock_tests;

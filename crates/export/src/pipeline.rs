@@ -188,8 +188,9 @@ impl Pipeline {
             if pool.supports_plan {
                 // When pre-planning / decoding runs before the parallel render pass,
                 // frame workers never execute nested joins that could starve the pool,
-                // so the batch can scale up to the requested pre-fetch depth.
-                requested
+                // but we bound the batch to at most twice the pool capacity (or requested)
+                // to avoid hoarding large uncompressed frame queues in memory.
+                requested.min(i64::try_from(pool.capacity.saturating_mul(2)).unwrap_or(requested))
             } else {
                 requested.min(i64::try_from(pool.capacity).unwrap_or(i64::MAX))
             }
@@ -224,9 +225,9 @@ impl Pipeline {
         let renderer = if settings.gpu_rendering == GpuRendering::Off {
             None
         } else {
-            // Up to 16 GPU renderers in the pool (one per Rayon thread) so larger batches stay in
-            // flight and saturate the GPU and hardware encoder without idling between read-backs.
-            let count = rayon::current_num_threads().clamp(4, 16);
+            // Up to 4 GPU renderers in the pool: saturates GPU and hardware encoders without PCIe
+            // read-back contention and bounds VRAM and staging buffer memory.
+            let count = rayon::current_num_threads().clamp(2, 4);
             let mut list = Vec::with_capacity(count);
             for _ in 0..count {
                 if let Some(r) = build_frame_renderer() {

@@ -52,12 +52,11 @@ impl<T> Shelf<T> {
         Some(b)
     }
 
-    fn give(&mut self, mut b: Vec<T>, max_bytes: usize) {
+    fn give(&mut self, b: Vec<T>, max_bytes: usize) {
         let n = Self::size(&b);
         if n < MIN_BYTES || self.bytes.saturating_add(n) > max_bytes {
             return;
         }
-        b.clear();
         self.bytes += n;
         self.bufs.push(b);
     }
@@ -77,7 +76,8 @@ const F32_MAX_BYTES: usize = 320 << 20;
 fn take<T>(shelf: &Mutex<Shelf<T>>, len: usize) -> Vec<T> {
     let found = shelf.lock().unwrap_or_else(PoisonError::into_inner).take(len);
     match found {
-        Some(b) => {
+        Some(mut b) => {
+            b.clear();
             REUSED.fetch_add(1, Ordering::Relaxed);
             b
         }
@@ -100,6 +100,38 @@ pub fn take_u8(len: usize) -> Vec<u8> {
 /// [`take_u8`] for 16-bit planes.
 pub fn take_u16(len: usize) -> Vec<u16> {
     take(&U16, len)
+}
+
+/// A buffer of `len` bytes whose contents are unspecified when recycled (the caller overwrites
+/// every element). Avoids zero-filling recycled plane buffers before overwriting them.
+pub fn take_u8_overwritten(len: usize) -> Vec<u8> {
+    let found = U8.lock().unwrap_or_else(PoisonError::into_inner).take(len);
+    match found {
+        Some(mut b) => {
+            b.resize(len, 0);
+            REUSED.fetch_add(1, Ordering::Relaxed);
+            b
+        }
+        None => vec![0u8; len],
+    }
+}
+
+/// [`take_u8_overwritten`] for 16-bit planes.
+pub fn take_u16_overwritten(len: usize) -> Vec<u16> {
+    let found = U16.lock().unwrap_or_else(PoisonError::into_inner).take(len);
+    match found {
+        Some(mut b) => {
+            b.resize(len, 0);
+            REUSED.fetch_add(1, Ordering::Relaxed);
+            b
+        }
+        None => vec![0u16; len],
+    }
+}
+
+/// Hand back a byte buffer (such as a prepared half-float upload plane) nobody needs any more.
+pub fn give_u8(plane: Arc<Vec<u8>>) {
+    give(&U8, plane);
 }
 
 /// A buffer of exactly `len` floats whose contents are unspecified (whatever it held last, or zeros
