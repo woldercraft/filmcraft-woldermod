@@ -644,9 +644,8 @@ impl Exporter {
                     progress.done.fetch_add((end - f) as u64, Ordering::Relaxed);
                     self.next = end;
                     if !self.settings.part_of_batch {
-                        filmcraft_codecs::release_idle();
-                        filmcraft_frame::pool::trim_f32();
-                        filmcraft_frame::pool::trim_planes();
+                        self.pipe.trim();
+                        crate::trim_heap();
                     }
                     Ok(Step::Progress)
                 }
@@ -682,9 +681,8 @@ impl Exporter {
                 // Periodic memory hygiene: evict completed source decoders and free idle frame shelves
                 // so long timeline exports across multiple video files don't accumulate gigabytes of RAM.
                 if !self.settings.part_of_batch {
-                    filmcraft_codecs::release_idle();
-                    filmcraft_frame::pool::trim_f32();
-                    filmcraft_frame::pool::trim_planes();
+                    self.pipe.trim();
+                    crate::trim_heap();
                 }
                 Ok(Step::Progress)
             }

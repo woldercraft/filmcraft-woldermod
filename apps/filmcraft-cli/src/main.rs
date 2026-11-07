@@ -272,9 +272,14 @@ impl filmcraft_export::FrameRenderer for GpuFrameRenderer {
     ) -> Option<filmcraft_render::Image> {
         self.0.render(project, seq, t, opts, sources)
     }
+
+    fn trim(&mut self) {
+        self.0.trim();
+    }
 }
 
 fn register_gpu_frame_renderer() {
+    filmcraft_export::register_heap_trimmer(filmcraft_platform::trim_process_heap);
     filmcraft_export::register_frame_renderer(|| {
         filmcraft_gpu::ExportRenderer::new().map(|r| Box::new(GpuFrameRenderer(r)) as Box<dyn filmcraft_export::FrameRenderer>)
     });

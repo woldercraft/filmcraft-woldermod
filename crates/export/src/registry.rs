@@ -146,6 +146,29 @@ pub trait FrameRenderer: Send {
     fn render_plan_nv12(&mut self, _plan: &filmcraft_render::plan::FramePlan) -> Option<(u32, u32, Vec<u8>)> {
         None
     }
+
+    /// Free any cached textures, buffers, or uploads held by this renderer.
+    fn trim(&mut self) {}
+}
+
+static HEAP_TRIMMER: OnceLock<RwLock<Option<fn()>>> = OnceLock::new();
+
+/// Register an OS heap trimmer (e.g. `malloc_trim` on Linux) to reclaim idle process memory.
+pub fn register_heap_trimmer(trimmer: fn()) {
+    let lock = HEAP_TRIMMER.get_or_init(|| RwLock::new(None));
+    if let Ok(mut g) = lock.write() {
+        *g = Some(trimmer);
+    }
+}
+
+/// Call the registered heap trimmer if any.
+pub fn trim_heap() {
+    if let Some(lock) = HEAP_TRIMMER.get()
+        && let Ok(g) = lock.read()
+        && let Some(trim) = *g
+    {
+        trim();
+    }
 }
 
 /// Builds the frame renderer for one export, or `None` when this host cannot (no adapter).

@@ -108,6 +108,8 @@ pub struct GpuCompositor {
     pub uploaded_bytes: u64,
     /// Textures reused from recycling pool instead of newly allocated.
     pub textures_reused: u64,
+    max_local_uploads: usize,
+    max_texture_pool: usize,
 }
 
 impl GpuCompositor {
@@ -478,7 +480,15 @@ impl GpuCompositor {
             cpu_transitions: 0,
             uploaded_bytes: 0,
             textures_reused: 0,
+            max_local_uploads: MAX_LOCAL_UPLOADS,
+            max_texture_pool: MAX_TEXTURE_POOL,
         }
+    }
+
+    pub fn with_export_limits(mut self) -> Self {
+        self.max_local_uploads = 3;
+        self.max_texture_pool = 6;
+        self
     }
 
     pub(crate) fn with_shared_uploads(mut self, shared: SharedUploads) -> Self {
@@ -689,8 +699,9 @@ impl GpuCompositor {
             let mut shared_up = up.clone();
             shared_up.last_used = guard.0;
             guard.1.insert(key, shared_up);
-            if guard.1.len() > MAX_SHARED_UPLOADS {
-                let remove_n = guard.1.len() - MAX_SHARED_UPLOADS;
+            let shared_limit = if self.max_local_uploads < MAX_LOCAL_UPLOADS { 4 } else { MAX_SHARED_UPLOADS };
+            if guard.1.len() > shared_limit {
+                let remove_n = guard.1.len() - shared_limit;
                 let mut v: Vec<(u64, (usize, u32, u32))> = guard.1.iter().map(|(k, u)| (u.last_used, *k)).collect();
                 v.sort_unstable();
                 for (_, k) in v.into_iter().take(remove_n) {
@@ -705,15 +716,15 @@ impl GpuCompositor {
 
     fn trim_uploads(&mut self) {
         // keep the most recent uploads (enough for several stacked layers + playback lookahead)
-        if self.uploads.len() > MAX_LOCAL_UPLOADS {
+        if self.uploads.len() > self.max_local_uploads {
             let mut v: Vec<(u64, (usize, u32, u32))> = self.uploads.iter().map(|(k, u)| (u.last_used, *k)).collect();
             v.sort_unstable();
-            for (_, k) in v.into_iter().take(self.uploads.len() - MAX_LOCAL_UPLOADS) {
+            for (_, k) in v.into_iter().take(self.uploads.len() - self.max_local_uploads) {
                 if let Some(u) = self.uploads.remove(&k)
                     && let Ok(texs) = Arc::try_unwrap(u.textures)
                 {
                     for item in texs {
-                        if self.texture_pool.len() < MAX_TEXTURE_POOL {
+                        if self.texture_pool.len() < self.max_texture_pool {
                             self.texture_pool.push(item);
                         }
                     }

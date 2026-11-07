@@ -125,6 +125,13 @@ impl RendererPool {
         self.available.notify_all();
         res.ok()
     }
+
+    fn trim(&self) {
+        let mut free = self.renderers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for r in free.iter_mut() {
+            r.trim();
+        }
+    }
 }
 
 /// The immutable part of an export: everything needed to produce one output frame.
@@ -169,14 +176,22 @@ impl Drop for Pipeline {
     /// another thread (a monitor) are left alone.
     fn drop(&mut self) {
         if self.trim_pool {
-            filmcraft_frame::pool::trim_f32();
-            filmcraft_codecs::release_idle();
-            filmcraft_frame::pool::trim_planes();
+            self.trim();
         }
     }
 }
 
 impl Pipeline {
+    /// Free cached GPU compositor uploads/textures, decode caches, and recycled plane buffers.
+    pub(crate) fn trim(&self) {
+        if let Some(pool) = &self.renderer {
+            pool.trim();
+        }
+        filmcraft_codecs::release_idle();
+        filmcraft_frame::pool::trim_f32();
+        filmcraft_frame::pool::trim_planes();
+    }
+
     /// Bound outer frame tasks before spawning them, not inside a Rayon job. A renderer can
     /// invoke nested parallel decoding/conversion; those joins may steal another frame task.
     /// With at most one active batch and no more tasks than the initial renderer capacity,
@@ -219,9 +234,9 @@ impl Pipeline {
         let renderer = if settings.gpu_rendering == GpuRendering::Off {
             None
         } else {
-            // Between 4 and 8 GPU renderers in the pool so larger batches stay in flight and saturate
-            // the GPU and hardware encoder without excessive staging buffer memory.
-            let count = rayon::current_num_threads().clamp(4, 8);
+            // Between 2 and 4 GPU renderers in the pool: saturates the GPU and hardware encoder
+            // without excessive VRAM or staging buffer memory.
+            let count = rayon::current_num_threads().clamp(2, 4);
             let mut list = Vec::with_capacity(count);
             for _ in 0..count {
                 if let Some(r) = build_frame_renderer() {

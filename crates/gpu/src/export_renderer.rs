@@ -174,13 +174,21 @@ impl ExportRenderer {
             .lock()
             .ok()
             .and_then(|mut idle| idle.pop())
-            .unwrap_or_else(|| GpuCompositor::new(&st.device, &st.queue).with_shared_uploads(st.uploads.clone()));
+            .unwrap_or_else(|| GpuCompositor::new(&st.device, &st.queue).with_shared_uploads(st.uploads.clone()))
+            .with_export_limits();
         Some(Self {
             _instance: st.instance.clone(),
             device: st.device.clone(),
             queue: st.queue.clone(),
             compositor: Some(compositor),
         })
+    }
+
+    /// Free cached textures and uploads held by this renderer's compositor.
+    pub fn trim(&mut self) {
+        if let Some(comp) = self.compositor.as_mut() {
+            comp.trim_all_uploads();
+        }
     }
 
     /// One frame as `render_sequence` would return it (premultiplied linear-light RGBA at the

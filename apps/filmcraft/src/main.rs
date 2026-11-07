@@ -474,9 +474,14 @@ impl filmcraft_export::FrameRenderer for GpuFrameRenderer {
     fn render_plan_nv12(&mut self, plan: &filmcraft_render::plan::FramePlan) -> Option<(u32, u32, Vec<u8>)> {
         self.0.render_plan_nv12(plan)
     }
+
+    fn trim(&mut self) {
+        self.0.trim();
+    }
 }
 
 fn register_gpu_frame_renderer() {
+    filmcraft_export::register_heap_trimmer(filmcraft_platform::trim_process_heap);
     filmcraft_export::register_frame_renderer(|| {
         filmcraft_gpu::ExportRenderer::new().map(|r| Box::new(GpuFrameRenderer(r)) as Box<dyn filmcraft_export::FrameRenderer>)
     });
