@@ -11,6 +11,7 @@
 //!
 //! Safe code; compiled on every target so its logic is tested everywhere.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use filmcraft_bitstream::{length_prefixed_nals, unescape_rbsp};
@@ -46,6 +47,10 @@ struct Pending {
     slices: Vec<(VASliceParameterBufferH264, Vec<u8>)>,
 }
 
+/// Decoded pictures kept in flight on the GPU before syncing and reading back, so the hardware
+/// decoder works on the next pictures while the CPU reads back and converts the previous one.
+pub const PIPELINE_DEPTH: usize = 4;
+
 /// H.264 front end of a stateless hardware decoder (see the module docs).
 pub struct Front<A: Accel> {
     accel: A,
@@ -55,6 +60,10 @@ pub struct Front<A: Accel> {
     spss: Vec<Option<Arc<Sps>>>,
     ppss: Vec<Option<Arc<Pps>>>,
     dpb: Dpb<Surface>,
+    /// Pictures that have left the DPB in output order and are still decoding on the GPU.
+    ready: VecDeque<Output<Surface>>,
+    /// Pictures with `pts < skip_before_pts` skip GPU->CPU readback when leaving `ready`.
+    skip_before_pts: i64,
     poc_state: PocState,
     prev_ref_frame_num: u32,
     active_sps: Option<Arc<Sps>>,
@@ -83,6 +92,8 @@ impl<A: Accel> Front<A> {
             spss: vec![None; 32],
             ppss: vec![None; 256],
             dpb: Dpb::new(),
+            ready: VecDeque::new(),
+            skip_before_pts: i64::MIN,
             poc_state: PocState::default(),
             prev_ref_frame_num: 0,
             active_sps: None,
@@ -123,23 +134,39 @@ impl<A: Accel> Front<A> {
         self.submit_pending(&mut frames)?;
         let mut outs = Vec::new();
         self.dpb.flush(&mut outs);
-        self.read_out(outs, &mut frames)?;
+        self.ready.extend(outs);
+        self.drain_ready(0, &mut frames)?;
         Ok(frames)
     }
 
     /// Forget every picture (after a seek).
     pub fn reset(&mut self) {
         self.dpb = Dpb::new();
+        self.ready.clear();
+        self.skip_before_pts = i64::MIN;
         self.poc_state = PocState::default();
         self.prev_ref_frame_num = 0;
         self.active_sps = None;
         self.pending = None;
     }
 
-    /// Read back the pictures the DPB output, right away: a surface leaving the DPB is reused by
-    /// the next picture.
+    /// Skip reading back pictures presented before `min_pts`.
+    pub fn set_skip_before(&mut self, min_pts: i64) {
+        self.skip_before_pts = min_pts;
+    }
+
+    /// Queue pictures that left the DPB and read back those past the in-flight pipeline depth.
     fn read_out(&mut self, outs: Vec<Output<Surface>>, frames: &mut Vec<DecodedFrame>) -> Result<()> {
-        for o in outs {
+        self.ready.extend(outs);
+        self.drain_ready(PIPELINE_DEPTH, frames)
+    }
+
+    fn drain_ready(&mut self, keep: usize, frames: &mut Vec<DecodedFrame>) -> Result<()> {
+        while self.ready.len() > keep {
+            let Some(o) = self.ready.pop_front() else { break };
+            if o.meta.pts < self.skip_before_pts {
+                continue;
+            }
             let frame = self.accel.read(o.frame.index).map_err(decode_err)?;
             frames.push(DecodedFrame { pts: o.meta.pts, frame, draft: false });
         }
@@ -271,13 +298,22 @@ impl<A: Accel> Front<A> {
         } else {
             let max = sps.max_frame_num();
             if sh.frame_num != self.prev_ref_frame_num && sh.frame_num != (self.prev_ref_frame_num + 1) % max {
+                self.drain_ready(0, frames)?;
                 self.fill_frame_num_gap(sh, sps, pts)?;
             }
         }
         self.read_out(outs, frames)?;
+        while (0..self.accel.surfaces().len()).all(|i| self.dpb.entries.iter().any(|e| e.frame.index == i) || self.ready.iter().any(|o| o.frame.index == i)) {
+            if self.ready.is_empty() {
+                break;
+            }
+            let keep = self.ready.len() - 1;
+            self.drain_ready(keep, frames)?;
+        }
         let poc = self.poc_state.compute(sh, sps);
-        let target =
-            (0..self.accel.surfaces().len()).find(|&i| !self.dpb.entries.iter().any(|e| e.frame.index == i)).ok_or_else(|| decode_err("no free surface"))?;
+        let target = (0..self.accel.surfaces().len())
+            .find(|&i| !self.dpb.entries.iter().any(|e| e.frame.index == i) && !self.ready.iter().any(|o| o.frame.index == i))
+            .ok_or_else(|| decode_err("no free surface"))?;
         self.pending = Some(Pending { target, sps: sps.clone(), pps: pps.clone(), first: sh.clone(), poc, pts, slices: Vec::new() });
         Ok(())
     }

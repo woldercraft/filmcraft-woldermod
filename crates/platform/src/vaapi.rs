@@ -136,7 +136,7 @@ mod linux {
                     sps.check_supported().map_err(|e| e.to_string())?;
                     let mbs = (sps.pic_width_in_mbs, sps.frame_height_in_mbs());
                     // the DPB, the picture being decoded, and one spare
-                    let count = sps.max_dpb_frames().saturating_add(2).min(18);
+                    let count = sps.max_dpb_frames().saturating_add(2 + h264::PIPELINE_DEPTH).min(24);
                     let session = Session::new(profiles, (sps.width(), sps.height()), count, geometry)?;
                     let vendor = session.vendor().to_string();
                     (Front::H264(Box::new(h264::Front::new(session, info.length_size, mbs, &info.parameter_sets).map_err(|e| e.to_string())?)), "H.264", vendor)
@@ -150,7 +150,7 @@ mod linux {
                     if sps.range_extension {
                         return Err("HEVC range extensions are not taken".into());
                     }
-                    let count = (sps.max_dec_pic_buffering as usize).saturating_add(2).min(18);
+                    let count = (sps.max_dec_pic_buffering as usize).saturating_add(2 + hevc::PIPELINE_DEPTH).min(24);
                     let size = (sps.width, sps.height);
                     let session = Session::new(profiles, size, count, geometry)?;
                     let vendor = session.vendor().to_string();
@@ -214,6 +214,13 @@ mod linux {
 
         fn is_disposable(&self, sample: &[u8]) -> bool {
             self.info.is_disposable(sample)
+        }
+
+        fn set_skip_before(&mut self, min_pts: i64) {
+            match &mut self.front {
+                Front::H264(f) => f.set_skip_before(min_pts),
+                Front::Hevc(f) => f.set_skip_before(min_pts),
+            }
         }
     }
 }

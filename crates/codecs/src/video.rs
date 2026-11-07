@@ -45,6 +45,10 @@ pub trait VideoDecoder: Send {
     /// shortcuts that only change pictures nothing references, which come out flagged
     /// [`DecodedFrame::draft`]. Decoders without such a mode ignore it.
     fn set_draft(&mut self, _on: bool) {}
+    /// Pictures presented before `min_pts` are late and need not be read back from the GPU or
+    /// converted to output frames (their DPB reference state is still maintained). `i64::MIN`
+    /// outputs every picture.
+    fn set_skip_before(&mut self, _min_pts: i64) {}
     /// Made with fewer worker threads than a decoder for playback gets, because it was made for
     /// background work ([`filmcraft_media::cancel::with_background`]). A request for a monitor
     /// replaces such a decoder.

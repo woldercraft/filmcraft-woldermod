@@ -330,6 +330,56 @@ fn upload_cache_keeps_buffers_alive() {
     assert!(Arc::strong_count(&px) > 1, "cached upload must own its pixel buffer");
 }
 
+#[test]
+fn texture_pool_recycles_evicted_textures() {
+    let Some((dev, q)) = device() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let mut c = GpuCompositor::new(&dev, &q);
+    assert_eq!(c.textures_reused, 0);
+    // Composite 36 unique frames so eviction triggers (MAX_LOCAL_UPLOADS = 32)
+    for i in 0..36 {
+        let px = Arc::new(vec![i as u8; 16 * 8 * 4]);
+        let frame = Arc::new(VideoFrame { width: 16, height: 8, data: PixelData::Rgba8(px), ..(*yuv_frame(16, 8)).clone() });
+        let plan = FramePlan::Layers {
+            width: 16,
+            height: 8,
+            layers: vec![PlanLayer { frame, matrix: Affine::IDENTITY, opacity: 1.0, blend: Blend::Normal, fx: None, input: None }],
+        };
+        c.composite(&plan);
+    }
+    // Evicted textures were recycled instead of reallocated
+    assert!(c.textures_reused >= 3, "textures were reused from pool: {}", c.textures_reused);
+    assert_eq!(c.texture_pool_len(), 1);
+}
+
+#[test]
+fn uniform_buffers_are_reused_across_frames() {
+    let Some((dev, q)) = device() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let mut c = GpuCompositor::new(&dev, &q);
+    assert_eq!(c.uniform_buffers_len(), 0);
+    let frame1 = Arc::new(VideoFrame { width: 16, height: 8, data: PixelData::Rgba8(Arc::new(vec![10u8; 16 * 8 * 4])), ..(*yuv_frame(16, 8)).clone() });
+    let frame2 = Arc::new(VideoFrame { width: 16, height: 8, data: PixelData::Rgba8(Arc::new(vec![20u8; 16 * 8 * 4])), ..(*yuv_frame(16, 8)).clone() });
+    let plan = FramePlan::Layers {
+        width: 16,
+        height: 8,
+        layers: vec![
+            PlanLayer { frame: frame1.clone(), matrix: Affine::IDENTITY, opacity: 1.0, blend: Blend::Normal, fx: None, input: None },
+            PlanLayer { frame: frame2.clone(), matrix: Affine::IDENTITY, opacity: 0.5, blend: Blend::Normal, fx: None, input: None },
+        ],
+    };
+    // Frame 1 creates 2 uniform buffers
+    c.composite(&plan);
+    assert_eq!(c.uniform_buffers_len(), 2);
+    // Frame 2 reuses the 2 existing uniform buffers without allocating any new buffer
+    c.composite(&plan);
+    assert_eq!(c.uniform_buffers_len(), 2);
+}
+
 /// The WGSL tetrahedral LUT matches `Lut3d::apply` on the CPU.
 #[test]
 fn gpu_lut_matches_cpu_tetrahedral() {

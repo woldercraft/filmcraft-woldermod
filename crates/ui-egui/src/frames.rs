@@ -347,7 +347,7 @@ struct PlanCache {
 
 impl PlanCache {
     const MAX: usize = 96;
-    const BUDGET: usize = 1 << 30;
+    const BUDGET: usize = 1536 << 20;
 
     fn get(&mut self, k: &FrameKey) -> Option<Arc<GpuPlan>> {
         self.clock += 1;
@@ -356,6 +356,16 @@ impl PlanCache {
             *used = clock;
             p.clone()
         })
+    }
+
+    fn touch(&mut self, k: &FrameKey) -> bool {
+        self.clock += 1;
+        let clock = self.clock;
+        if let Some((_, used, _)) = self.map.get_mut(k) {
+            *used = clock;
+            return true;
+        }
+        false
     }
 
     fn insert(&mut self, k: FrameKey, p: GpuPlan) {
@@ -387,6 +397,16 @@ struct Cache {
 }
 
 impl Cache {
+    fn touch(&mut self, k: &FrameKey) -> bool {
+        self.clock += 1;
+        let clock = self.clock;
+        if let Some((_, s)) = self.map.get_mut(k) {
+            *s = clock;
+            return true;
+        }
+        false
+    }
+
     fn insert(&mut self, k: FrameKey, v: Arc<Rgba>) {
         self.clock += 1;
         self.bytes += v.px.len();
@@ -422,6 +442,7 @@ struct FrameRequest<'a> {
     project: &'a Arc<Project>,
     priority: u32,
     prefetch: bool,
+    replace_view: bool,
     catch_up: Option<Tick>,
 }
 
@@ -437,8 +458,8 @@ pub fn prefetch_depth(speed: f64) -> i64 {
 pub const PREROLL_FRAMES: i64 = 6;
 
 /// Seconds before a scrubbed-to frame whose frames a seek still decodes in full (see
-/// [`FrameServer::request`]); earlier non-reference pictures are skipped on the way.
-pub const SCRUB_KEEP_S: f64 = 2.0;
+/// [`FrameServer::request`]); earlier pictures are skipped on the way.
+pub const SCRUB_KEEP_S: f64 = 0.0;
 pub const PREROLL_TIMEOUT_S: f64 = 0.5;
 
 /// How many revisions behind the project a playing monitor's picture may be while the frame due
@@ -621,14 +642,14 @@ impl FrameServer {
     /// non-reference pictures, while nearby frames stay decoded (and cached) for scrubbing back.
     pub fn request(&self, key: FrameKey, time: Tick, scale: f32, project: &Arc<Project>, prio: u32) {
         let late = (prio == 0).then(|| Tick::from_seconds_f64(SCRUB_KEEP_S));
-        self.request_job(FrameRequest { key, time, scale, project, priority: prio, prefetch: false, catch_up: late });
+        self.request_job(FrameRequest { key, time, scale, project, priority: prio, prefetch: false, replace_view: prio == 0, catch_up: late });
     }
 
     fn request_job(&self, request: FrameRequest<'_>) {
-        let FrameRequest { key, time, scale, project, priority: prio, prefetch, catch_up } = request;
+        let FrameRequest { key, time, scale, project, priority: prio, prefetch, replace_view, catch_up } = request;
         let hit = || self.shared.stats.lock().unwrap_or_else(PoisonError::into_inner).request_hits += 1;
-        if self.shared.done.lock().unwrap_or_else(PoisonError::into_inner).map.contains_key(&key)
-            || self.shared.plans.lock().unwrap_or_else(PoisonError::into_inner).map.contains_key(&key)
+        if self.shared.done.lock().unwrap_or_else(PoisonError::into_inner).touch(&key)
+            || self.shared.plans.lock().unwrap_or_else(PoisonError::into_inner).touch(&key)
         {
             hit();
             return;
@@ -651,7 +672,7 @@ impl FrameServer {
             return;
         }
         self.shared.stats.lock().unwrap_or_else(PoisonError::into_inner).request_misses += 1;
-        if prio == 0 {
+        if replace_view {
             // A new frame on screen for this view replaces the one asked for before: scrubbing
             // asks for one per refresh, and without this the oldest position would decode
             // first (or keep a decoder busy seeking to it) while the newest waits.
@@ -684,7 +705,9 @@ impl FrameServer {
         let dir = if speed < 0.0 { -1 } else { 1 };
         let step = speed.abs().max(1.0) as i64;
         let fps = rate.as_f64() * speed.abs().max(1.0) / step as f64;
-        let (lead, stride) = if preroll { (1, 1) } else { playback_plan(self.render_cost(), fps, self.shared.workers) };
+        let cost = self.render_cost();
+        let seq_plan_serial = matches!(key.target, Target::SequencePlan(_)) && cost <= 0.015;
+        let (lead, stride) = if preroll { (1, 1) } else { playback_plan(cost, fps, self.shared.workers) };
         if lead <= 1 {
             // the frame due now; once the clock runs, the frames before it are late
             self.request_job(FrameRequest {
@@ -694,7 +717,8 @@ impl FrameServer {
                 project,
                 priority: 0,
                 prefetch: false,
-                catch_up: (!preroll && dir > 0).then_some(Tick::ZERO),
+                replace_view: false,
+                catch_up: ((seq_plan_serial || !preroll) && dir > 0).then_some(Tick::ZERO),
             });
         }
         // During preroll the clock has not started: only the frames that gate start, not a
@@ -704,7 +728,11 @@ impl FrameServer {
             let f = key.frame + (lead + i * stride) * dir * step;
             if f >= 0 {
                 // forward play: frames before the playhead are late (reverse play skips nothing)
-                let late = (!preroll && dir > 0).then(|| rate.tick_of(f) - rate.tick_of(key.frame));
+                let late = if seq_plan_serial && dir > 0 {
+                    Some(Tick::ZERO)
+                } else {
+                    (!preroll && dir > 0).then(|| rate.tick_of(f) - rate.tick_of(key.frame))
+                };
                 self.request_job(FrameRequest {
                     key: FrameKey { frame: f, ..key },
                     time: rate.tick_of(f),
@@ -712,6 +740,7 @@ impl FrameServer {
                     project,
                     priority: i as u32 + 1,
                     prefetch: true,
+                    replace_view: false,
                     catch_up: late,
                 });
             }
@@ -719,12 +748,14 @@ impl FrameServer {
         let (target, rev, cur) = (key.target, key.revision, key.frame);
         let span = (lead + ahead * stride) * step + 26;
         let ahead_of = |k: &FrameKey| (k.frame - cur) * dir >= 0 && (k.frame - cur).abs() < span;
+        let near_running = |k: &FrameKey| (k.frame - cur) * dir >= -6 * step && (k.frame - cur).abs() < span;
         // Queued jobs of an older revision are dropped, but one already rendering a frame still
-        // ahead is left to finish (#1673): a value dragged during playback asks for a new
-        // revision on every pass, and cancelling those jobs each time left nothing ever ready.
+        // ahead (or within the 6-frame recent fallback window) is left to finish (#1673): a value
+        // dragged during playback asks for a new revision on every pass, and cancelling running
+        // jobs the instant the playhead steps one frame past them stalls sequential GOP decoding.
         self.retain_jobs(
             |k| k.target != target || (k.revision == rev && ahead_of(k)),
-            |k| k.target != target || (k.revision.saturating_add(PLAYING_REVISION_LAG) >= rev && k.revision <= rev && ahead_of(k)),
+            |k| k.target != target || (k.revision.saturating_add(PLAYING_REVISION_LAG) >= rev && k.revision <= rev && near_running(k)),
         );
     }
 
@@ -926,9 +957,27 @@ fn worker(
                     return;
                 }
                 if !q.is_empty() {
-                    // highest priority (lowest number) first; FIFO among equals
-                    let best = q.iter().enumerate().min_by_key(|(i, j)| (j.prio, *i)).map(|(i, _)| i).unwrap_or(0);
-                    if let Some(job) = q.remove(best) {
+                    let heavy_render = *sh.render_cost.lock().unwrap_or_else(PoisonError::into_inner) > 0.015;
+                    let mut in_flight = sh.in_flight.lock().unwrap_or_else(PoisonError::into_inner);
+                    // highest priority (lowest number) first; FIFO among equals.
+                    // For normal GPU playback (!heavy_render), run prefetch jobs for a sequence
+                    // target one at a time in strict frame order so a later prefetch worker never
+                    // barges ahead of an earlier frame on a sequential LongGOP decoder lock.
+                    let best = q
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, j)| {
+                            heavy_render
+                                || !matches!(j.key.target, Target::SequencePlan(_))
+                                || !in_flight.iter().any(|(k, c, _)| k.target == j.key.target && !c.load(Ordering::Relaxed))
+                        })
+                        .min_by_key(|(i, j)| (j.prio, *i))
+                        .map(|(i, _)| i);
+                    if let Some(best) = best
+                        && let Some(job) = q.remove(best)
+                    {
+                        in_flight.push((job.key, job.cancel.clone(), job.prefetch));
+                        drop(in_flight);
                         break job;
                     }
                 }
@@ -941,6 +990,7 @@ fn worker(
         let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_job(&sh, &job, &pool, &services, &previews)));
         if ran.is_err() {
             sh.in_flight.lock().unwrap_or_else(PoisonError::into_inner).retain(|(k, c, _)| !(*k == job.key && Arc::ptr_eq(c, &job.cancel)));
+            sh.cv.notify_one();
             sh.stats.lock().unwrap_or_else(PoisonError::into_inner).failed += 1;
             log::error!("frame job {:?} panicked; the worker continues", job.key);
         }
@@ -968,7 +1018,9 @@ fn run_job(sh: &Shared, job: &Job, pool: &Arc<MediaPool>, services: &Arc<dyn Ser
         if sh.stop.load(Ordering::Relaxed) {
             job.cancel.store(true, Ordering::Relaxed);
         }
-        in_flight.push((job.key, job.cancel.clone(), job.prefetch));
+        if !in_flight.iter().any(|(k, c, _)| *k == job.key && Arc::ptr_eq(c, &job.cancel)) {
+            in_flight.push((job.key, job.cancel.clone(), job.prefetch));
+        }
     }
     if INJECT_PANICS.load(Ordering::Relaxed) > 0 && INJECT_PANICS.fetch_sub(1, Ordering::Relaxed) > 0 {
         crate::crash::injected_fault("injected frame-job fault");
@@ -1009,6 +1061,7 @@ fn run_job(sh: &Shared, job: &Job, pool: &Arc<MediaPool>, services: &Arc<dyn Ser
     });
     let cancelled = job.cancel.load(Ordering::Relaxed);
     sh.in_flight.lock().unwrap_or_else(PoisonError::into_inner).retain(|(k, c, _)| !(*k == job.key && Arc::ptr_eq(c, &job.cancel)));
+    sh.cv.notify_one();
     if job.prefetch {
         // Work beyond fetching source frames (decoding is sequential per source and is
         // not saved by skipping frames, so it is left out of the estimate). A cancelled job

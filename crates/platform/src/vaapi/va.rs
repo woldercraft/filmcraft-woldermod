@@ -44,6 +44,7 @@ struct Api {
     end_picture: ffi::vaEndPicture,
     sync_surface: ffi::vaSyncSurface,
     create_image: ffi::vaCreateImage,
+    derive_image: ffi::vaDeriveImage,
     destroy_image: ffi::vaDestroyImage,
     get_image: ffi::vaGetImage,
     put_image: ffi::vaPutImage,
@@ -94,6 +95,7 @@ fn load() -> Result<Api, String> {
         end_picture: sym!(va, vaEndPicture),
         sync_surface: sym!(va, vaSyncSurface),
         create_image: sym!(va, vaCreateImage),
+        derive_image: sym!(va, vaDeriveImage),
         destroy_image: sym!(va, vaDestroyImage),
         get_image: sym!(va, vaGetImage),
         put_image: sym!(va, vaPutImage),
@@ -531,6 +533,22 @@ impl Accel for Session {
     }
 
     fn read(&mut self, index: usize) -> Result<VideoFrame, String> {
+        let surface = *self.surfaces.get(index).ok_or("surface out of range")?;
+        let api = self.display.api;
+        // SAFETY: `surface` is one of this session's surfaces.
+        let st = unsafe { (api.sync_surface)(self.display.dpy, surface) };
+        self.display.check(st, "vaSyncSurface")?;
+        let mut derived = VAImage { image_id: ffi::VA_INVALID_ID, buf: ffi::VA_INVALID_ID, ..Default::default() };
+        // SAFETY: `surface` is valid on this display; `derived` is a live output.
+        let dst = unsafe { (api.derive_image)(self.display.dpy, surface, &mut derived) };
+        if dst == ffi::VA_STATUS_SUCCESS {
+            let res = self.read_image(&derived);
+            // SAFETY: `derived` came from a successful `vaDeriveImage` on this display.
+            unsafe { (api.destroy_image)(self.display.dpy, derived.image_id) };
+            if let Ok(frame) = res {
+                return Ok(frame);
+            }
+        }
         let image = self.get_image(index)?;
         self.read_image(&image)
     }

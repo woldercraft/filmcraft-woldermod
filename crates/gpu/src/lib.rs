@@ -58,6 +58,7 @@ const ACCUM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 pub(crate) struct Uploaded {
     /// Y, Cb, Cr (or the RGBA texture) and the alpha plane (the dummy texture when there is none).
     views: [wgpu::TextureView; 4],
+    textures: Arc<Vec<(wgpu::Texture, wgpu::TextureView, u32, u32, wgpu::TextureFormat)>>,
     kind: u32,
     code_scale: f32,
     /// Multiplier from the alpha texture's sample to alpha 0..1; 0 when the frame has no alpha plane.
@@ -88,6 +89,9 @@ pub struct GpuCompositor {
     accum_readback_buf: Option<(wgpu::Buffer, u64)>,
     uploads: HashMap<(usize, u32, u32), Uploaded>,
     shared_uploads: Option<SharedUploads>,
+    texture_pool: Vec<(wgpu::Texture, wgpu::TextureView, u32, u32, wgpu::TextureFormat)>,
+    uniform_buffers: Vec<wgpu::Buffer>,
+    uniform_buffer_idx: usize,
     clock: u64,
     dummy: wgpu::TextureView,
     /// The effect stage (None on devices without compute shaders or storage textures: layers
@@ -102,6 +106,20 @@ pub struct GpuCompositor {
     pub cpu_transitions: u64,
     /// Total bytes uploaded (stats).
     pub uploaded_bytes: u64,
+    /// Textures reused from recycling pool instead of newly allocated.
+    pub textures_reused: u64,
+}
+
+impl GpuCompositor {
+    /// Idle textures kept in the recycling pool.
+    pub fn texture_pool_len(&self) -> usize {
+        self.texture_pool.len()
+    }
+
+    /// Number of uniform buffers allocated and pooled.
+    pub fn uniform_buffers_len(&self) -> usize {
+        self.uniform_buffers.len()
+    }
 }
 
 fn tex_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
@@ -197,12 +215,20 @@ fn f16_to_f32_table() -> &'static [f32] {
 /// 8-bit frames need no conversion and have none.
 #[derive(Clone, Debug, Default)]
 pub struct Prepared {
-    planes: Vec<Vec<u8>>,
+    planes: Vec<Arc<Vec<u8>>>,
 }
 
 impl Prepared {
     pub fn bytes(&self) -> usize {
-        self.planes.iter().map(Vec::len).sum()
+        self.planes.iter().map(|p| p.len()).sum()
+    }
+}
+
+impl Drop for Prepared {
+    fn drop(&mut self) {
+        for p in self.planes.drain(..) {
+            filmcraft_frame::pool::give_u8(p);
+        }
     }
 }
 
@@ -224,14 +250,14 @@ impl PreparedPlan {
 /// Values per parallel chunk when converting.
 const CHUNK: usize = 1 << 15;
 
-fn f32_to_f16_bytes(v: &[f32]) -> Vec<u8> {
-    let mut out = vec![0u8; v.len() * 2];
+fn f32_to_f16_bytes(v: &[f32]) -> Arc<Vec<u8>> {
+    let mut out = filmcraft_frame::pool::take_u8_overwritten(v.len() * 2);
     out.par_chunks_mut(CHUNK * 2).zip(v.par_chunks(CHUNK)).for_each(|(o, s)| {
         for (o, x) in o.as_chunks_mut::<2>().0.iter_mut().zip(s) {
             o.copy_from_slice(&f32_to_f16(*x).to_le_bytes());
         }
     });
-    out
+    Arc::new(out)
 }
 
 /// Half floats of `code / 2^bits` for every 16-bit code (built once per bit depth).
@@ -245,15 +271,15 @@ fn code_table(bits: u32) -> &'static [[u8; 2]] {
 }
 
 /// `code / 2^bits` as half floats, through a per-code table (same values as converting each sample).
-fn codes_to_f16_bytes(v: &[u16], bits: u32) -> Vec<u8> {
+fn codes_to_f16_bytes(v: &[u16], bits: u32) -> Arc<Vec<u8>> {
     let table = code_table(bits);
-    let mut out = vec![0u8; v.len() * 2];
+    let mut out = filmcraft_frame::pool::take_u8_overwritten(v.len() * 2);
     out.par_chunks_mut(CHUNK * 2).zip(v.par_chunks(CHUNK)).for_each(|(o, s)| {
         for (o, c) in o.as_chunks_mut::<2>().0.iter_mut().zip(s) {
             o.copy_from_slice(&table[*c as usize]);
         }
     });
-    out
+    Arc::new(out)
 }
 
 /// Convert a frame's texels for upload (None when it uploads as it is).
@@ -289,8 +315,9 @@ fn prepare_layers(layers: &[PlanLayer]) -> PreparedPlan {
     PreparedPlan { layers: layers.iter().map(|l| prepare_frame(&l.frame)).collect(), ..Default::default() }
 }
 
-const MAX_SHARED_UPLOADS: usize = 8;
-const MAX_LOCAL_UPLOADS: usize = 6;
+const MAX_SHARED_UPLOADS: usize = 32;
+const MAX_LOCAL_UPLOADS: usize = 32;
+const MAX_TEXTURE_POOL: usize = 48;
 
 impl GpuCompositor {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
@@ -437,6 +464,9 @@ impl GpuCompositor {
             accum_readback_buf: None,
             uploads: HashMap::new(),
             shared_uploads: None,
+            texture_pool: Vec::new(),
+            uniform_buffers: Vec::new(),
+            uniform_buffer_idx: 0,
             clock: 0,
             dummy,
             fx,
@@ -447,6 +477,7 @@ impl GpuCompositor {
             gpu_transitions: 0,
             cpu_transitions: 0,
             uploaded_bytes: 0,
+            textures_reused: 0,
         }
     }
 
@@ -485,17 +516,25 @@ impl GpuCompositor {
         v
     }
 
-    fn plane_texture(&mut self, w: u32, h: u32, format: wgpu::TextureFormat, bytes: &[u8], bpp: u32) -> wgpu::TextureView {
-        let t = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("filmcraft-plane"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
+    fn plane_texture(&mut self, w: u32, h: u32, format: wgpu::TextureFormat, bytes: &[u8], bpp: u32) -> (wgpu::Texture, wgpu::TextureView) {
+        let (t, v) = if let Some(pos) = self.texture_pool.iter().position(|(_, _, pw, ph, pf)| *pw == w && *ph == h && *pf == format) {
+            self.textures_reused += 1;
+            let (t, v, _, _, _) = self.texture_pool.swap_remove(pos);
+            (t, v)
+        } else {
+            let t = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("filmcraft-plane"),
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let v = t.create_view(&Default::default());
+            (t, v)
+        };
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo { texture: &t, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
             bytes,
@@ -503,7 +542,7 @@ impl GpuCompositor {
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
         self.uploaded_bytes += bytes.len() as u64;
-        t.create_view(&Default::default())
+        (t, v)
     }
 
     /// Upload (or reuse) the textures of a frame, using `prep` when it was converted beforehand.
@@ -540,9 +579,11 @@ impl GpuCompositor {
         let dummy = || d0.clone();
         let up = match &f.data {
             PixelData::Rgba8(d) => {
-                let v = self.plane_texture(w, h, wgpu::TextureFormat::Rgba8UnormSrgb, d, 4);
+                let (t, v) = self.plane_texture(w, h, wgpu::TextureFormat::Rgba8UnormSrgb, d, 4);
+                let texs = Arc::new(vec![(t, v.clone(), w, h, wgpu::TextureFormat::Rgba8UnormSrgb)]);
                 Uploaded {
                     views: [v, dummy(), dummy(), dummy()],
+                    textures: texs,
                     kind: 0,
                     code_scale: 1.0,
                     alpha_scale: 0.0,
@@ -553,16 +594,18 @@ impl GpuCompositor {
             }
             PixelData::RgbaF32(d) => {
                 let owned;
-                let half = match prep {
-                    Some(p) => &p.planes[0],
+                let p = match prep {
+                    Some(p) => p,
                     None => {
-                        owned = f32_to_f16_bytes(d);
+                        owned = Prepared { planes: vec![f32_to_f16_bytes(d)] };
                         &owned
                     }
                 };
-                let v = self.plane_texture(w, h, wgpu::TextureFormat::Rgba16Float, half, 8);
+                let (t, v) = self.plane_texture(w, h, wgpu::TextureFormat::Rgba16Float, &p.planes[0], 8);
+                let texs = Arc::new(vec![(t, v.clone(), w, h, wgpu::TextureFormat::Rgba16Float)]);
                 Uploaded {
                     views: [v, dummy(), dummy(), dummy()],
+                    textures: texs,
                     kind: 1,
                     code_scale: 1.0,
                     alpha_scale: 0.0,
@@ -574,13 +617,23 @@ impl GpuCompositor {
             PixelData::Yuv8 { planes, chroma, alpha } => {
                 let (sx, sy) = chroma.shifts();
                 let (cw, ch) = (w.div_ceil(1 << sx), h.div_ceil(1 << sy));
-                let y = self.plane_texture(w, h, wgpu::TextureFormat::R8Unorm, &planes[0], 1);
-                let u = self.plane_texture(cw, ch, wgpu::TextureFormat::R8Unorm, &planes[1], 1);
-                let v = self.plane_texture(cw, ch, wgpu::TextureFormat::R8Unorm, &planes[2], 1);
-                let a = alpha.as_ref().map(|a| self.plane_texture(w, h, wgpu::TextureFormat::R8Unorm, a, 1));
+                let (ty, vy) = self.plane_texture(w, h, wgpu::TextureFormat::R8Unorm, &planes[0], 1);
+                let (tu, vu) = self.plane_texture(cw, ch, wgpu::TextureFormat::R8Unorm, &planes[1], 1);
+                let (tv, vv) = self.plane_texture(cw, ch, wgpu::TextureFormat::R8Unorm, &planes[2], 1);
+                let mut texs = vec![
+                    (ty, vy.clone(), w, h, wgpu::TextureFormat::R8Unorm),
+                    (tu, vu.clone(), cw, ch, wgpu::TextureFormat::R8Unorm),
+                    (tv, vv.clone(), cw, ch, wgpu::TextureFormat::R8Unorm),
+                ];
+                let a = alpha.as_ref().map(|a| {
+                    let (ta, va) = self.plane_texture(w, h, wgpu::TextureFormat::R8Unorm, a, 1);
+                    texs.push((ta, va.clone(), w, h, wgpu::TextureFormat::R8Unorm));
+                    va
+                });
                 let alpha_scale = if a.is_some() { 1.0 } else { 0.0 };
                 Uploaded {
-                    views: [y, u, v, a.unwrap_or_else(dummy)],
+                    views: [vy, vu, vv, a.unwrap_or_else(dummy)],
+                    textures: Arc::new(texs),
                     kind: 2,
                     code_scale: 255.0,
                     alpha_scale,
@@ -601,15 +654,25 @@ impl GpuCompositor {
                         &owned
                     }
                 };
-                let y = self.plane_texture(w, h, wgpu::TextureFormat::R16Float, &p.planes[0], 2);
-                let u = self.plane_texture(cw, ch, wgpu::TextureFormat::R16Float, &p.planes[1], 2);
-                let v = self.plane_texture(cw, ch, wgpu::TextureFormat::R16Float, &p.planes[2], 2);
+                let (ty, vy) = self.plane_texture(w, h, wgpu::TextureFormat::R16Float, &p.planes[0], 2);
+                let (tu, vu) = self.plane_texture(cw, ch, wgpu::TextureFormat::R16Float, &p.planes[1], 2);
+                let (tv, vv) = self.plane_texture(cw, ch, wgpu::TextureFormat::R16Float, &p.planes[2], 2);
+                let mut texs = vec![
+                    (ty, vy.clone(), w, h, wgpu::TextureFormat::R16Float),
+                    (tu, vu.clone(), cw, ch, wgpu::TextureFormat::R16Float),
+                    (tv, vv.clone(), cw, ch, wgpu::TextureFormat::R16Float),
+                ];
                 // (full-resolution alpha plane: its codes span 0..2^bits - 1, hence the scale)
-                let a = alpha.as_ref().and_then(|_| p.planes.get(3)).map(|b| self.plane_texture(w, h, wgpu::TextureFormat::R16Float, b, 2));
+                let a = alpha.as_ref().and_then(|_| p.planes.get(3)).map(|b| {
+                    let (ta, va) = self.plane_texture(w, h, wgpu::TextureFormat::R16Float, b, 2);
+                    texs.push((ta, va.clone(), w, h, wgpu::TextureFormat::R16Float));
+                    va
+                });
                 let alpha_scale = if a.is_some() { scale / (scale - 1.0) } else { 0.0 };
                 let _ = Chroma::C420;
                 Uploaded {
-                    views: [y, u, v, a.unwrap_or_else(dummy)],
+                    views: [vy, vu, vv, a.unwrap_or_else(dummy)],
+                    textures: Arc::new(texs),
                     kind: 2,
                     code_scale: scale,
                     alpha_scale,
@@ -646,7 +709,15 @@ impl GpuCompositor {
             let mut v: Vec<(u64, (usize, u32, u32))> = self.uploads.iter().map(|(k, u)| (u.last_used, *k)).collect();
             v.sort_unstable();
             for (_, k) in v.into_iter().take(self.uploads.len() - MAX_LOCAL_UPLOADS) {
-                self.uploads.remove(&k);
+                if let Some(u) = self.uploads.remove(&k)
+                    && let Ok(texs) = Arc::try_unwrap(u.textures)
+                {
+                    for item in texs {
+                        if self.texture_pool.len() < MAX_TEXTURE_POOL {
+                            self.texture_pool.push(item);
+                        }
+                    }
+                }
             }
         }
     }
@@ -654,6 +725,12 @@ impl GpuCompositor {
     /// Free all cached texture uploads and clear the shared upload table, releasing memory to the OS.
     pub fn trim_all_uploads(&mut self) {
         self.uploads.clear();
+        self.texture_pool.clear();
+        self.uniform_buffers.clear();
+        self.uniform_buffer_idx = 0;
+        if let Some(fx) = self.fx.as_mut() {
+            fx.trim_uploads();
+        }
         if let Some(shared) = &self.shared_uploads
             && let Ok(mut guard) = shared.lock()
         {
@@ -761,14 +838,23 @@ impl GpuCompositor {
         u
     }
 
-    fn uniform_buffer(&self, u: &[f32; UNIFORM_FLOATS]) -> wgpu::Buffer {
-        let bytes: Vec<u8> = u.iter().flat_map(|v| v.to_le_bytes()).collect();
-        let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("layer-u"),
-            size: bytes.len() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+    fn uniform_buffer(&mut self, u: &[f32; UNIFORM_FLOATS]) -> wgpu::Buffer {
+        let mut bytes = [0u8; UNIFORM_FLOATS * 4];
+        for (i, v) in u.iter().enumerate() {
+            bytes[i * 4..(i + 1) * 4].copy_from_slice(&v.to_le_bytes());
+        }
+        let idx = self.uniform_buffer_idx;
+        self.uniform_buffer_idx += 1;
+        if idx >= self.uniform_buffers.len() {
+            let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("layer-u"),
+                size: bytes.len() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.uniform_buffers.push(buf);
+        }
+        let buf = self.uniform_buffers[idx].clone();
         self.queue.write_buffer(&buf, 0, &bytes);
         buf
     }
@@ -781,6 +867,7 @@ impl GpuCompositor {
     /// [`composite`](Self::composite) with texel conversions already done by [`prepare`] (the
     /// result is identical; only the upload work on this thread differs).
     pub fn composite_prepared(&mut self, plan: &FramePlan, prep: Option<&PreparedPlan>) -> (wgpu::TextureView, (u32, u32)) {
+        self.uniform_buffer_idx = 0;
         self.render_plan(plan, prep, true, true)
     }
 
@@ -1058,7 +1145,16 @@ impl GpuCompositor {
     /// composites (`plan_frame` composites only transitions the GPU draws); None on a failed
     /// read-back.
     pub fn render_export_prepared(&mut self, plan: &FramePlan, prep: Option<&PreparedPlan>) -> Option<(u32, u32, Vec<f32>)> {
+        self.uniform_buffer_idx = 0;
         let t = std::time::Instant::now();
+        if matches!(plan, FramePlan::Composite { .. }) {
+            self.render_plan(plan, prep, true, false);
+            let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("filmcraft-composite-export") });
+            let size = self.copy_accumulator(&mut enc)?;
+            self.queue.submit([enc.finish()]);
+            export_renderer::timing::add_submit(t.elapsed());
+            return self.map_accumulator(size);
+        }
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("filmcraft-composite-export") });
         self.record_plan(&mut enc, plan, prep, true, false);
         let size = self.copy_accumulator(&mut enc)?;
@@ -1074,6 +1170,7 @@ impl GpuCompositor {
         if matches!(plan, FramePlan::Composite { .. }) {
             return None;
         }
+        self.uniform_buffer_idx = 0;
         let t = std::time::Instant::now();
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("filmcraft-composite-export-rgba8") });
         self.record_plan(&mut enc, plan, prep, true, true);
@@ -1091,6 +1188,7 @@ impl GpuCompositor {
         if matches!(plan, FramePlan::Composite { .. }) || self.nv12_unavailable {
             return None;
         }
+        self.uniform_buffer_idx = 0;
         let t = std::time::Instant::now();
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("filmcraft-composite-export-nv12") });
         let (_, (w, h)) = self.record_plan(&mut enc, plan, prep, true, true);
@@ -1123,6 +1221,7 @@ impl GpuCompositor {
     /// applied, read back as linear premultiplied RGBA f32 (what `LayerFx` ops produce on the
     /// CPU from the same frame). None when the working image does not fit in a texture.
     pub fn effect_image(&mut self, frame: &VideoFrame, fx: &filmcraft_render::plan::LayerFx) -> Option<(u32, u32, Vec<f32>)> {
+        self.uniform_buffer_idx = 0;
         let key = self.upload(frame, None);
         let src = self.src_info(frame, key)?;
         let views = self.uploads.get(&key)?.views.clone();

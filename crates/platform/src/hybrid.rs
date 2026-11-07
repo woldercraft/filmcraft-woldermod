@@ -32,6 +32,7 @@ pub struct HybridDecoder {
     entry: SampleEntry,
     info: StreamInfo,
     draft: bool,
+    skip_before_pts: i64,
     /// Samples (and pts) since the last restart point; `None` once the bound was passed.
     log: Option<Vec<(Vec<u8>, i64)>>,
     log_bytes: usize,
@@ -54,6 +55,7 @@ impl HybridDecoder {
             entry,
             info,
             draft: false,
+            skip_before_pts: i64::MIN,
             log: Some(Vec::new()),
             log_bytes: 0,
             last_irap: 0,
@@ -158,6 +160,7 @@ impl HybridDecoder {
         drop(hw);
         let mut sw = filmcraft_codecs::software_video_decoder(&self.entry).map_err(|e| CodecError::Decode(format!("{err}; no software decoder: {e}")))?;
         sw.set_draft(self.draft);
+        sw.set_skip_before(self.skip_before_pts);
         self.sw = Some(sw);
         let Some(log) = self.log.take() else {
             // Too far from a restart point to replay: the next seek restarts in software.
@@ -233,6 +236,7 @@ impl VideoDecoder for HybridDecoder {
         if let Some(sw) = self.sw.as_mut() {
             sw.reset();
         }
+        self.skip_before_pts = i64::MIN;
         self.log = Some(Vec::new());
         self.log_bytes = 0;
         self.last_irap = 0;
@@ -260,6 +264,16 @@ impl VideoDecoder for HybridDecoder {
         self.draft = on;
         if let Some(sw) = self.sw.as_mut() {
             sw.set_draft(on);
+        }
+    }
+
+    fn set_skip_before(&mut self, min_pts: i64) {
+        self.skip_before_pts = min_pts;
+        if let Some(hw) = self.hw.as_mut() {
+            hw.set_skip_before(min_pts);
+        }
+        if let Some(sw) = self.sw.as_mut() {
+            sw.set_skip_before(min_pts);
         }
     }
 }

@@ -9,6 +9,8 @@
 //! op to the GPU when [`FxOp::gpu_ok`] says the shader covers it (finite numbers, no minifying
 //! resample), otherwise the clip is rendered on the CPU as before.
 
+use std::sync::Arc;
+
 use filmcraft_color::{hsl_to_rgb, linear_to_srgb, luma709, rgb_to_hsl};
 use filmcraft_geom::Affine;
 use filmcraft_project::EffectInstance;
@@ -198,6 +200,8 @@ pub enum FxOp {
         warning_color: [f32; 3],
     },
     Lumetri {
+        input_lut: Option<Arc<filmcraft_color::Lut3d>>,
+        look_lut: Option<Arc<filmcraft_color::Lut3d>>,
         gains: [f32; 3],
         exposure: f32,
         contrast: f32,
@@ -634,7 +638,23 @@ impl FxOp {
 
                 let hsl_on = b(e, "hsl_on");
 
-                let gpu_capable = !is_hdr && !has_input_lut && !has_look_lut && look <= 8 && !has_curves && !hsl_on;
+                let input_lut_3d = if has_input_lut {
+                    crate::luts::resolve(cx.project, text(e, "input_lut")).and_then(|l| l.baked_cube(33).ok()).map(Arc::new)
+                } else {
+                    None
+                };
+                let look_lut_3d = if has_look_lut {
+                    crate::luts::resolve(cx.project, text(e, "look_lut")).and_then(|l| l.baked_cube(33).ok()).map(Arc::new)
+                } else {
+                    None
+                };
+
+                let gpu_capable = !is_hdr
+                    && (!has_input_lut || input_lut_3d.is_some())
+                    && (!has_look_lut || look_lut_3d.is_some())
+                    && look <= 8
+                    && !has_curves
+                    && !hsl_on;
 
                 let bf = |id: &str| if basic_on { f(e, id, cx) } else { 0.0 };
                 let temp = bf("temperature") / 100.0;
@@ -658,6 +678,8 @@ impl FxOp {
                 let aspect = if h > 0 { (w as f32 / h as f32).max(1e-4) } else { 1.0 };
 
                 FxOp::Lumetri {
+                    input_lut: input_lut_3d,
+                    look_lut: look_lut_3d,
                     gains,
                     exposure,
                     contrast,
@@ -1108,6 +1130,8 @@ impl FxOp {
                 });
             }
             FxOp::Lumetri {
+                input_lut,
+                look_lut,
                 gains,
                 exposure,
                 contrast,
@@ -1141,6 +1165,7 @@ impl FxOp {
                 lh,
                 ..
             } => {
+                let (input_lut, look_lut) = (input_lut.as_deref(), look_lut.as_deref());
                 let gains = *gains;
                 let (exposure, contrast, hl, sh, wh, bl, sat) = (*exposure, *contrast, *hl, *sh, *wh, *bl, *sat);
                 let (creative_on, faded, vib, st, ht) = (*creative_on, *faded, *vib, *st, *ht);
@@ -1149,6 +1174,10 @@ impl FxOp {
                 let (wheels_on, ws, wm, wh_rgb, ls, lm, lh) = (*wheels_on, *ws, *wm, *wh_rgb, *ls, *lm, *lh);
                 let (w, h) = (img.w as f32, img.h as f32);
                 img.map_rgb(|c, x, y| {
+                    let c = match input_lut {
+                        Some(l) => dec(l.apply(enc(c))),
+                        None => c,
+                    };
                     // white balance + exposure in linear light
                     let lin = [c[0] * gains[0] * exposure, c[1] * gains[1] * exposure, c[2] * gains[2] * exposure];
                     let mut v = enc(lin);
@@ -1199,7 +1228,14 @@ impl FxOp {
                         let k = 1.0 + va * 0.2 * e2;
                         v = v.map(|q| if va < 0.0 { q * k.max(0.0) } else { q + (1.0 - q) * (k - 1.0) });
                     }
-                    if look > 0 && look <= 8 && look_k.abs() > 1e-5 {
+                    if let Some(l) = look_lut {
+                        if look_k.abs() > 1e-5 {
+                            let mut v2 = enc(dec(v));
+                            let lk = l.apply(v2);
+                            v2 = [v2[0] + (lk[0] - v2[0]) * look_k, v2[1] + (lk[1] - v2[1]) * look_k, v2[2] + (lk[2] - v2[2]) * look_k];
+                            v = v2;
+                        }
+                    } else if look > 0 && look <= 8 && look_k.abs() > 1e-5 {
                         let mut v2 = enc(dec(v));
                         let lk = crate::effects::apply_look(look, v2);
                         v2 = [v2[0] + (lk[0] - v2[0]) * look_k, v2[1] + (lk[1] - v2[1]) * look_k, v2[2] + (lk[2] - v2[2]) * look_k];

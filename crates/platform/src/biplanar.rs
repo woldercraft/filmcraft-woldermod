@@ -52,31 +52,34 @@ pub fn to_frame(src: &Biplanar, g: &Geometry) -> Result<VideoFrame, String> {
         return Err(format!("decoded surface ({} rows, {} byte rows) is smaller than the {w}x{h} picture at {ox},{oy}", src.rows, src.stride));
     }
     let data = if bps == 1 {
-        let mut yp = pool::take_u8(w * h);
-        for y in 0..h {
-            yp.extend_from_slice(row(src.luma, src.stride, oy + y, ox, w)?);
+        let mut yp = pool::take_u8_overwritten(w * h);
+        for (y, dst_row) in yp.chunks_exact_mut(w).enumerate() {
+            dst_row.copy_from_slice(row(src.luma, src.stride, oy + y, ox, w)?);
         }
-        let (mut u, mut v) = (pool::take_u8(cw * ch), pool::take_u8(cw * ch));
-        for y in 0..ch {
-            let pairs = row(src.chroma, src.stride, coy + y, cox * 2, cw * 2)?.as_chunks::<2>().0;
-            for &[ub, vb] in pairs {
-                u.push(ub);
-                v.push(vb);
+        let (mut u, mut v) = (pool::take_u8_overwritten(cw * ch), pool::take_u8_overwritten(cw * ch));
+        for ((y, u_row), v_row) in u.chunks_exact_mut(cw).enumerate().zip(v.chunks_exact_mut(cw)) {
+            let src_row = row(src.chroma, src.stride, coy + y, cox * 2, cw * 2)?;
+            for ((dst_u, dst_v), &[ub, vb]) in u_row.iter_mut().zip(v_row.iter_mut()).zip(src_row.as_chunks::<2>().0) {
+                *dst_u = ub;
+                *dst_v = vb;
             }
         }
         PixelData::Yuv8 { planes: [Arc::new(yp), Arc::new(u), Arc::new(v)], chroma: Chroma::C420, alpha: None }
     } else {
         let shift = 16 - g.bits;
-        let mut yp = pool::take_u16(w * h);
-        for y in 0..h {
-            yp.extend(row(src.luma, src.stride, oy + y, ox * 2, w * 2)?.as_chunks::<2>().0.iter().map(|b| u16::from_le_bytes([b[0], b[1]]) >> shift));
+        let mut yp = pool::take_u16_overwritten(w * h);
+        for (y, dst_row) in yp.chunks_exact_mut(w).enumerate() {
+            let src_row = row(src.luma, src.stride, oy + y, ox * 2, w * 2)?;
+            for (dst, b) in dst_row.iter_mut().zip(src_row.as_chunks::<2>().0) {
+                *dst = u16::from_le_bytes(*b) >> shift;
+            }
         }
-        let (mut u, mut v) = (pool::take_u16(cw * ch), pool::take_u16(cw * ch));
-        for y in 0..ch {
-            let quads = row(src.chroma, src.stride, coy + y, cox * 4, cw * 4)?.as_chunks::<4>().0;
-            for q in quads {
-                u.push(u16::from_le_bytes([q[0], q[1]]) >> shift);
-                v.push(u16::from_le_bytes([q[2], q[3]]) >> shift);
+        let (mut u, mut v) = (pool::take_u16_overwritten(cw * ch), pool::take_u16_overwritten(cw * ch));
+        for ((y, u_row), v_row) in u.chunks_exact_mut(cw).enumerate().zip(v.chunks_exact_mut(cw)) {
+            let src_row = row(src.chroma, src.stride, coy + y, cox * 4, cw * 4)?;
+            for ((dst_u, dst_v), q) in u_row.iter_mut().zip(v_row.iter_mut()).zip(src_row.as_chunks::<4>().0) {
+                *dst_u = u16::from_le_bytes([q[0], q[1]]) >> shift;
+                *dst_v = u16::from_le_bytes([q[2], q[3]]) >> shift;
             }
         }
         PixelData::Yuv16 { planes: [Arc::new(yp), Arc::new(u), Arc::new(v)], chroma: Chroma::C420, bits: g.bits, alpha: None }

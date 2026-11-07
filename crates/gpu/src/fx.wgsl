@@ -57,6 +57,7 @@ const OP_BOKEH_UP: u32 = 35u;
 const OP_THREE_WAY: u32 = 36u;
 const OP_COLOR_WHEELS: u32 = 37u;
 const OP_LUMETRI_LOOK: u32 = 38u;
+const OP_LUT_3D: u32 = 39u;
 
 fn size() -> vec2<i32> {
     return vec2<i32>(i32(u.i0.y), i32(u.i0.z));
@@ -729,6 +730,52 @@ fn lumetri_look_op(c: vec3<f32>) -> vec3<f32> {
     return dec(v);
 }
 
+fn lut_at(r: u32, g: u32, b: u32, n: u32) -> vec3<f32> {
+    return textureLoad(aux, vec2<i32>(i32(r + g * n), i32(b)), 0).rgb;
+}
+
+fn tetra_lut(c: vec3<f32>, n: u32, dmin: vec3<f32>, dmax: vec3<f32>) -> vec3<f32> {
+    let m = f32(n - 1u);
+    let t = clamp((c - dmin) / (dmax - dmin), vec3(0.0), vec3(1.0)) * m;
+    let i = min(vec3<u32>(t), vec3(n - 2u));
+    let f = t - vec3<f32>(i);
+    let fr = f.x;
+    let fg = f.y;
+    let fb = f.z;
+    let c000 = lut_at(i.x, i.y, i.z, n);
+    let c111 = lut_at(i.x + 1u, i.y + 1u, i.z + 1u, n);
+    var ca: vec3<f32>;
+    var cb: vec3<f32>;
+    var w: vec4<f32>;
+    if (fr > fg) {
+        if (fg > fb) {
+            ca = lut_at(i.x + 1u, i.y, i.z, n); cb = lut_at(i.x + 1u, i.y + 1u, i.z, n); w = vec4(1.0 - fr, fr - fg, fg - fb, fb);
+        } else if (fr > fb) {
+            ca = lut_at(i.x + 1u, i.y, i.z, n); cb = lut_at(i.x + 1u, i.y, i.z + 1u, n); w = vec4(1.0 - fr, fr - fb, fb - fg, fg);
+        } else {
+            ca = lut_at(i.x, i.y, i.z + 1u, n); cb = lut_at(i.x + 1u, i.y, i.z + 1u, n); w = vec4(1.0 - fb, fb - fr, fr - fg, fg);
+        }
+    } else if (fb > fg) {
+        ca = lut_at(i.x, i.y, i.z + 1u, n); cb = lut_at(i.x, i.y + 1u, i.z + 1u, n); w = vec4(1.0 - fb, fb - fg, fg - fr, fr);
+    } else if (fb > fr) {
+        ca = lut_at(i.x, i.y + 1u, i.z, n); cb = lut_at(i.x, i.y + 1u, i.z + 1u, n); w = vec4(1.0 - fg, fg - fb, fb - fr, fr);
+    } else {
+        ca = lut_at(i.x, i.y + 1u, i.z, n); cb = lut_at(i.x + 1u, i.y, i.z, n); w = vec4(1.0 - fg, fg - fr, fr - fb, fb);
+    }
+    return w.x * c000 + w.y * ca + w.z * cb + w.w * c111;
+}
+
+fn lut_3d_op(c: vec3<f32>) -> vec3<f32> {
+    let n = u.i1.x;
+    let dmin = u.p0.xyz;
+    let intensity = u.p0.w;
+    let dmax = u.p1.xyz;
+    let in_c = enc(c);
+    let lut_c = tetra_lut(in_c, n, dmin, dmax);
+    let blended = in_c + (lut_c - in_c) * intensity;
+    return dec(blended);
+}
+
 // One output pixel of every op but the running-sum box blur.
 fn pixel(op: u32, p: vec2<i32>) -> vec4<f32> {
     let s = size();
@@ -934,6 +981,16 @@ fn pixel(op: u32, p: vec2<i32>) -> vec4<f32> {
             }
             let c = o.rgb / a;
             let res = lumetri_look_op(c);
+            return vec4(res * a, a);
+        }
+        case OP_LUT_3D: {
+            let o = ld(p);
+            let a = o.a;
+            if a <= 1e-6 {
+                return o;
+            }
+            let c = o.rgb / a;
+            let res = lut_3d_op(c);
             return vec4(res * a, a);
         }
         default: {
