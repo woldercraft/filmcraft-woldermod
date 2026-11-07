@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use rayon::prelude::*;
 use filmcraft_frame::{Chroma, PixelData, VideoFrame, pool};
 
 /// A mapped biplanar surface: a luma plane followed by interleaved chroma, `stride` bytes per row.
@@ -53,35 +54,52 @@ pub fn to_frame(src: &Biplanar, g: &Geometry) -> Result<VideoFrame, String> {
     }
     let data = if bps == 1 {
         let mut yp = pool::take_u8_overwritten(w * h);
-        for (y, dst_row) in yp.chunks_exact_mut(w).enumerate() {
-            dst_row.copy_from_slice(row(src.luma, src.stride, oy + y, ox, w)?);
+        if ox == 0 && oy == 0 && src.stride == w {
+            yp.copy_from_slice(src.luma.get(..w * h).ok_or("luma plane shorter than picture")?);
+        } else {
+            yp.par_chunks_exact_mut(w).enumerate().for_each(|(y, dst_row)| {
+                if let Ok(src_row) = row(src.luma, src.stride, oy + y, ox, w) {
+                    dst_row.copy_from_slice(src_row);
+                }
+            });
         }
-        let (mut u, mut v) = (pool::take_u8_overwritten(cw * ch), pool::take_u8_overwritten(cw * ch));
-        for ((y, u_row), v_row) in u.chunks_exact_mut(cw).enumerate().zip(v.chunks_exact_mut(cw)) {
-            let src_row = row(src.chroma, src.stride, coy + y, cox * 2, cw * 2)?;
-            for ((dst_u, dst_v), &[ub, vb]) in u_row.iter_mut().zip(v_row.iter_mut()).zip(src_row.as_chunks::<2>().0) {
-                *dst_u = ub;
-                *dst_v = vb;
-            }
-        }
+        let mut u = pool::take_u8_overwritten(cw * ch);
+        let mut v = pool::take_u8_overwritten(cw * ch);
+        u.par_chunks_exact_mut(cw)
+            .zip(v.par_chunks_exact_mut(cw))
+            .enumerate()
+            .for_each(|(y, (u_row, v_row))| {
+                if let Ok(src_row) = row(src.chroma, src.stride, coy + y, cox * 2, cw * 2) {
+                    for ((dst_u, dst_v), &[ub, vb]) in u_row.iter_mut().zip(v_row.iter_mut()).zip(src_row.as_chunks::<2>().0) {
+                        *dst_u = ub;
+                        *dst_v = vb;
+                    }
+                }
+            });
         PixelData::Yuv8 { planes: [Arc::new(yp), Arc::new(u), Arc::new(v)], chroma: Chroma::C420, alpha: None }
     } else {
         let shift = 16 - g.bits;
         let mut yp = pool::take_u16_overwritten(w * h);
-        for (y, dst_row) in yp.chunks_exact_mut(w).enumerate() {
-            let src_row = row(src.luma, src.stride, oy + y, ox * 2, w * 2)?;
-            for (dst, b) in dst_row.iter_mut().zip(src_row.as_chunks::<2>().0) {
-                *dst = u16::from_le_bytes(*b) >> shift;
+        yp.par_chunks_exact_mut(w).enumerate().for_each(|(y, dst_row)| {
+            if let Ok(src_row) = row(src.luma, src.stride, oy + y, ox * 2, w * 2) {
+                for (dst, b) in dst_row.iter_mut().zip(src_row.as_chunks::<2>().0) {
+                    *dst = u16::from_le_bytes(*b) >> shift;
+                }
             }
-        }
-        let (mut u, mut v) = (pool::take_u16_overwritten(cw * ch), pool::take_u16_overwritten(cw * ch));
-        for ((y, u_row), v_row) in u.chunks_exact_mut(cw).enumerate().zip(v.chunks_exact_mut(cw)) {
-            let src_row = row(src.chroma, src.stride, coy + y, cox * 4, cw * 4)?;
-            for ((dst_u, dst_v), q) in u_row.iter_mut().zip(v_row.iter_mut()).zip(src_row.as_chunks::<4>().0) {
-                *dst_u = u16::from_le_bytes([q[0], q[1]]) >> shift;
-                *dst_v = u16::from_le_bytes([q[2], q[3]]) >> shift;
-            }
-        }
+        });
+        let mut u = pool::take_u16_overwritten(cw * ch);
+        let mut v = pool::take_u16_overwritten(cw * ch);
+        u.par_chunks_exact_mut(cw)
+            .zip(v.par_chunks_exact_mut(cw))
+            .enumerate()
+            .for_each(|(y, (u_row, v_row))| {
+                if let Ok(src_row) = row(src.chroma, src.stride, coy + y, cox * 4, cw * 4) {
+                    for ((dst_u, dst_v), q) in u_row.iter_mut().zip(v_row.iter_mut()).zip(src_row.as_chunks::<4>().0) {
+                        *dst_u = u16::from_le_bytes([q[0], q[1]]) >> shift;
+                        *dst_v = u16::from_le_bytes([q[2], q[3]]) >> shift;
+                    }
+                }
+            });
         PixelData::Yuv16 { planes: [Arc::new(yp), Arc::new(u), Arc::new(v)], chroma: Chroma::C420, bits: g.bits, alpha: None }
     };
     Ok(VideoFrame { width: w as u32, height: h as u32, data, color: g.color, par: g.par, pts: filmcraft_time::Tick::ZERO })

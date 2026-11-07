@@ -310,6 +310,7 @@ struct VaapiEncoder {
     writer: Option<JoinHandle<std::result::Result<(), String>>>,
     rx: Receiver<Vec<u8>>,
     buf: Vec<u8>,
+    stderr_log: std::sync::Arc<std::sync::Mutex<String>>,
 }
 
 impl VaapiEncoder {
@@ -391,6 +392,29 @@ impl VaapiEncoder {
                 }
             })
             .map_err(|e| format!("failed to spawn VA-API reader thread: {e}"))?;
+        let stderr = child.stderr.take();
+        let stderr_log = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let err_log = stderr_log.clone();
+        if let Some(mut se) = stderr {
+            let _ = std::thread::Builder::new()
+                .name("vaapi-encode-stderr".into())
+                .spawn(move || {
+                    let mut chunk = [0u8; 4096];
+                    while let Ok(n) = se.read(&mut chunk) {
+                        if n == 0 {
+                            break;
+                        }
+                        if let Ok(mut text) = err_log.lock() {
+                            let s = String::from_utf8_lossy(&chunk[..n]);
+                            text.push_str(&s);
+                            if text.len() > 8192 {
+                                let start = text.len() - 8192;
+                                *text = text[start..].to_string();
+                            }
+                        }
+                    }
+                });
+        }
         Ok(Self {
             cfg,
             rate,
@@ -401,6 +425,7 @@ impl VaapiEncoder {
             writer: Some(writer),
             rx,
             buf: Vec::new(),
+            stderr_log,
         })
     }
 
@@ -511,10 +536,7 @@ impl VideoEncoder for VaapiEncoder {
         nv12.extend_from_slice(rgba);
         let write_tx = self.write_tx.as_ref().ok_or_else(|| ExportError::Encode("VA-API encoder stdin closed".into()))?;
         if let Err(e) = write_tx.send(nv12) {
-            let mut err = String::new();
-            if let Some(mut se) = self.child.stderr.take() {
-                let _ = se.read_to_string(&mut err);
-            }
+            let err = self.stderr_log.lock().map(|s| s.clone()).unwrap_or_default();
             let detail = err.trim();
             if detail.is_empty() {
                 return Err(ExportError::Encode(format!("VA-API write failed: {e}")));
@@ -542,10 +564,7 @@ impl VideoEncoder for VaapiEncoder {
         }
         let status = self.child.wait().map_err(|e| ExportError::Encode(format!("VA-API wait failed: {e}")))?;
         if !status.success() {
-            let mut err = String::new();
-            if let Some(mut se) = self.child.stderr.take() {
-                let _ = se.read_to_string(&mut err);
-            }
+            let err = self.stderr_log.lock().map(|s| s.clone()).unwrap_or_default();
             return Err(ExportError::Encode(format!("VA-API encoder failed: {}", err.trim())));
         }
         self.drain_packets(true)
