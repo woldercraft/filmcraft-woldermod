@@ -48,11 +48,18 @@ pub use blend::Blend;
 pub use image::Image;
 
 /// Resolves project items to media sources (the engine owns the media pool).
-pub trait SourceProvider: Sync {
+pub trait SourceProvider: Send + Sync {
     fn source(&self, item: ItemId) -> Option<SharedSource>;
+
+    /// An isolated copy of this provider for parallel segmented export pipelines,
+    /// ensuring each concurrent segment gets its own decoders, file handles, and GOP caches,
+    /// avoiding decoder lock contention and GOP re-decode thrashing.
+    fn isolate(&self) -> Option<Box<dyn SourceProvider>> {
+        None
+    }
 }
 
-impl<F: Fn(ItemId) -> Option<SharedSource> + Sync> SourceProvider for F {
+impl<F: Fn(ItemId) -> Option<SharedSource> + Send + Sync> SourceProvider for F {
     fn source(&self, item: ItemId) -> Option<SharedSource> {
         self(item)
     }
@@ -835,6 +842,10 @@ pub struct SourceMap(pub std::collections::HashMap<ItemId, SharedSource>);
 impl SourceProvider for SourceMap {
     fn source(&self, item: ItemId) -> Option<SharedSource> {
         self.0.get(&item).cloned()
+    }
+
+    fn isolate(&self) -> Option<Box<dyn SourceProvider>> {
+        Some(Box::new(SourceMap(self.0.clone())))
     }
 }
 

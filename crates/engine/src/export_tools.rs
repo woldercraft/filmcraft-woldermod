@@ -232,6 +232,7 @@ fn apply_nested_settings(settings: &mut ExportSettings, params: &Value, cmd: &st
 }
 
 /// Apply the legacy flat export parameters after preset and nested settings have been resolved.
+#[allow(clippy::cognitive_complexity)]
 fn apply_flat_overrides(settings: &mut ExportSettings, p: &Value, cmd: &str) -> Result<()> {
     // flat overrides (the original file.exportMedia parameters and a few common ones)
     if let Some(f) = str_p(p, "format") {
