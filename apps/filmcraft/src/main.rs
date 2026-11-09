@@ -459,6 +459,10 @@ impl filmcraft_export::FrameRenderer for GpuFrameRenderer {
         self.0.render(project, seq, t, opts, sources)
     }
 
+    fn caps(&self) -> filmcraft_render::plan::DeviceCaps {
+        self.0.caps()
+    }
+
     fn supports_plan(&self) -> bool {
         true
     }

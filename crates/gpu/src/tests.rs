@@ -606,59 +606,105 @@ fn hdr_input_gpu_matches_cpu() {
 }
 
 #[test]
-fn gpu_compositor_sequence_plan_with_adjustment_layer_blurs() {
-    use filmcraft_time::{FrameRate, Tick, TICKS_PER_SECOND};
-    use filmcraft_media::{Generator, MediaSource, SharedSource};
-    use filmcraft_media::generators::GeneratorSource;
-    use filmcraft_render::SourceMap;
+fn gpu_adjustment_step_matches_cpu_between_layers() {
+    use filmcraft_project::ParamValue;
+    use filmcraft_render::gpufx::FxOp;
     let Some((dev, q)) = device() else {
         eprintln!("no GPU adapter; skipping");
         return;
     };
-    let mut c = GpuCompositor::new(&dev, &q);
-    let (w, h) = (320, 180);
-    let mut p = filmcraft_project::Project::new("adj_test");
-    let seq = p.new_sequence("s", filmcraft_project::SequenceSettings { width: w, height: h, frame_rate: FrameRate::FPS_24, ..Default::default() }, 2, 0, None);
-    let mut map = SourceMap::default();
-    let g = GeneratorSource::new(Generator::ColorMatte { color: [1.0, 0.0, 0.0, 1.0] }, w, h, FrameRate::FPS_24, Tick(10 * TICKS_PER_SECOND));
-    let info = g.info().clone();
-    let matte = p.add_item("m", filmcraft_project::Label::Iris, filmcraft_project::ItemKind::Media(Box::new(filmcraft_project::MediaClip {
-        media: filmcraft_project::MediaRef::Generator(g.generator.clone()),
-        info,
-        interpret: Default::default(),
-        mark_in: None,
-        mark_out: None,
-        markers: Vec::new(),
-        offline: false,
-        proxy: None,
-        identity: None,
-    })), None);
-    map.0.insert(matte, std::sync::Arc::new(g) as SharedSource);
-    let ti1 = p.make_track_item(matte, filmcraft_project::TrackKind::Video, Tick::ZERO, filmcraft_time::TimeRange::new(Tick::ZERO, FrameRate::FPS_24.tick_of(48)), FrameRate::FPS_24).unwrap();
-    p.sequence_mut(seq).unwrap().video_tracks[0].items.push(ti1);
-
-    let plan0 = filmcraft_render::plan::plan_frame(&p, seq, Tick::ZERO, filmcraft_render::RenderOptions::default(), &map);
-    let prep0 = prepare(&plan0);
-    c.composite_prepared(&plan0, Some(&prep0));
-    let (_, _, out0) = c.read_output().expect("readback");
-
-    let adj = p.add_item("adj", filmcraft_project::Label::Lavender, filmcraft_project::ItemKind::AdjustmentLayer { width: w, height: h, rate: FrameRate::FPS_24, duration: FrameRate::FPS_24.tick_of(48) }, None);
-    let mut ti2 = p.make_track_item(adj, filmcraft_project::TrackKind::Video, Tick::ZERO, filmcraft_time::TimeRange::new(Tick::ZERO, FrameRate::FPS_24.tick_of(48)), FrameRate::FPS_24).unwrap();
-    let mut e = filmcraft_project::find_effect("gaussian_blur").unwrap().instance();
-    e.params.get_mut("blurriness").unwrap().value = filmcraft_project::ParamValue::Float(1830.2);
-    e.params.get_mut("repeat_edge").unwrap().value = filmcraft_project::ParamValue::Bool(false);
-    let pos = ti2.effects.iter().position(|e| e.def().is_some_and(|d| d.intrinsic)).unwrap_or(ti2.effects.len());
-    ti2.effects.insert(pos, e);
-    p.sequence_mut(seq).unwrap().video_tracks[1].items.push(ti2);
-
-    let plan1 = filmcraft_render::plan::plan_frame(&p, seq, Tick::ZERO, filmcraft_render::RenderOptions::default(), &map);
-    let prep1 = prepare(&plan1);
-    c.composite_prepared(&plan1, Some(&prep1));
-    let (_, _, out1) = c.read_output().expect("readback");
-
-    eprintln!("out0 at (100, 100): {:?}", &out0[100 * 320 * 4 + 100 * 4 .. 100 * 320 * 4 + 100 * 4 + 4]);
-    eprintln!("out1 at (100, 100): {:?}", &out1[100 * 320 * 4 + 100 * 4 .. 100 * 320 * 4 + 100 * 4 + 4]);
-    assert_ne!(out0, out1);
+    let (w, h) = (128usize, 72usize);
+    // a soft picture at 70 % opacity: the canvas under the adjustment layer is partly transparent
+    let below = {
+        let px = (0..w * h)
+            .flat_map(|i| {
+                let (x, y) = ((i % w) as f32 / w as f32, (i / w) as f32 / h as f32);
+                [x, y, 0.5 * (1.0 - x), 1.0]
+            })
+            .collect();
+        PlanLayer::new(Arc::new(VideoFrame::rgba_f32(w as u32, h as u32, px)), Affine::IDENTITY, 0.7, Blend::Normal)
+    };
+    // an opaque blue box above the adjustment layer, which must stay untouched
+    let above = {
+        let px = (0..w * h)
+            .flat_map(|i| {
+                let (x, y) = (i % w, i / w);
+                if (40..70).contains(&x) && (20..40).contains(&y) { [0.0, 0.0, 1.0, 1.0] } else { [0.0; 4] }
+            })
+            .collect();
+        PlanLayer::new(Arc::new(VideoFrame::rgba_f32(w as u32, h as u32, px)), Affine::IDENTITY, 1.0, Blend::Normal)
+    };
+    let effect = |id: &str, params: &[(&str, f64)]| {
+        let mut e = filmcraft_project::find_effect(id).unwrap().instance();
+        for (p, v) in params {
+            e.param_mut(p).unwrap().value = ParamValue::Float(*v);
+        }
+        e
+    };
+    let cx = filmcraft_render::effects::FxCtx {
+        t: filmcraft_time::Tick::ZERO,
+        px_scale: 1.0,
+        seconds: 0.0,
+        timecode: "",
+        clip_name: "",
+        project: None,
+        env: None,
+        frame_rate: 24.0,
+        working: filmcraft_color::WorkingSpace::Rec709,
+    };
+    let chain = [
+        effect("proc_amp", &[("brightness", 20.0)]),
+        effect("gaussian_blur", &[("blurriness", 8.0)]),
+        effect("lumetri", &[("contrast", 20.0), ("exposure", -0.25), ("vignette_amount", -3.0)]),
+    ];
+    let ops: Vec<FxOp> = chain.iter().map(|e| FxOp::eval(e, &cx, w, h).filter(FxOp::gpu_ok).expect("GPU op")).collect();
+    let plan =
+        FramePlan::Composite { width: w, height: h, steps: vec![PlanStep::Layers(vec![below]), PlanStep::Adjust { ops }, PlanStep::Layers(vec![above])] };
+    let reference = execute_cpu(&plan);
+    // with the effect stage the step runs on the GPU; without one (a device that fails its
+    // validation) the frame is composited on the CPU, with the same picture
+    for stage in [true, false] {
+        let mut c = GpuCompositor::new(&dev, &q);
+        if stage && c.fx.is_none() {
+            eprintln!("no effect stage on this device; skipping its half");
+            continue;
+        }
+        if !stage {
+            c.fx = None;
+        }
+        // the Program monitor's path (sRGB over black)
+        c.composite_prepared(&plan, Some(&prepare(&plan)));
+        if stage {
+            // the next frame reuses the step's working textures instead of making them again
+            let created = c.fx.as_ref().map(fx::FxStage::created);
+            c.composite_prepared(&plan, Some(&prepare(&plan)));
+            assert_eq!(c.fx.as_ref().map(fx::FxStage::created), created, "the second frame made new working textures");
+        }
+        let (_, _, gpu) = c.read_output().expect("readback");
+        let mut diffs: Vec<u32> = reference
+            .over_black_rgba8()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(gpu.as_chunks::<4>().0)
+            .map(|(a, b)| (0..3).map(|k| a[k].abs_diff(b[k]) as u32).max().unwrap())
+            .collect();
+        diffs.sort_unstable();
+        let p99 = diffs[diffs.len() * 99 / 100];
+        let mean = diffs.iter().sum::<u32>() as f64 / diffs.len() as f64;
+        eprintln!("adjustment step, stage {stage}: p99 {p99}, mean {mean:.3}");
+        assert!(p99 <= 6 && mean < 1.5, "adjustment step, stage {stage}: p99 {p99}, mean {mean}");
+        // the export's path (linear premultiplied f32, no resolve)
+        let (ew, eh, px) = c.render_export_prepared(&plan, Some(&prepare(&plan))).expect("export render");
+        assert_eq!((ew as usize, eh as usize), (w, h));
+        let worst = px.iter().zip(&reference.px).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        eprintln!("adjustment step, stage {stage}, export: max |GPU - CPU| {worst}");
+        assert!(worst < 0.02, "stage {stage}: export render of the adjustment step differs by {worst}");
+        let i = (30 * w + 55) * 4;
+        assert_eq!(px.get(i..i + 4), Some(&[0.0, 0.0, 1.0, 1.0][..]), "the layer above the adjustment layer is untouched");
+        let want = if stage { (3, 0) } else { (0, 2) };
+        assert_eq!((c.gpu_adjustments, c.cpu_adjustments), want, "stage {stage}");
+    }
 }
 
 /// Regression for #3418: several threads creating instances and devices, using them and dropping

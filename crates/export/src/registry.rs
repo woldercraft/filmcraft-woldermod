@@ -124,6 +124,11 @@ pub trait FrameRenderer: Send {
         sources: &dyn SourceProvider,
     ) -> Option<filmcraft_render::Image>;
 
+    /// What the renderer's device runs. The export plans with it before taking a renderer
+    /// ([`filmcraft_render::plan::is_cpu_frame`]), so a frame the device can't composite renders
+    /// on the export's own thread instead of on the CPU inside the renderer.
+    fn caps(&self) -> filmcraft_render::plan::DeviceCaps;
+
     /// Whether this renderer supports rendering a pre-planned [`filmcraft_render::plan::FramePlan`]
     /// decoded outside the renderer pool lock.
     fn supports_plan(&self) -> bool {

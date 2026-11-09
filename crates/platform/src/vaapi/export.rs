@@ -154,6 +154,7 @@ fn config_for(format: Format, w: u32, h: u32, rate: FrameRate, s: &ExportSetting
         (false, H264Profile::Baseline) => "constrained_baseline",
         (false, H264Profile::Main) => "main",
         (false, H264Profile::High) => "high",
+        (false, H264Profile::High10) => "high_10",
     };
     Ok(Config {
         device,

@@ -73,6 +73,10 @@ pub(crate) struct FxStage {
     pool: HashMap<(u32, u32), Vec<Target>>,
     used: HashSet<(u32, u32)>,
     lut_cache: HashMap<usize, (Arc<filmcraft_color::Lut3d>, wgpu::Texture, wgpu::TextureView)>,
+    /// Open [`begin_frame`](Self::begin_frame)s.
+    frames: u32,
+    /// Working textures created so far (a steady stream of frames creates none).
+    created: u64,
 }
 
 /// One compute pass of a job.
@@ -476,7 +480,17 @@ impl FxStage {
             multiview_mask: None,
             cache: None,
         });
-        Self { px: compute("fx_px"), run: compute("fx_run"), bgl, source, pool: HashMap::new(), used: HashSet::new(), lut_cache: HashMap::new() }
+        Self {
+            px: compute("fx_px"),
+            run: compute("fx_run"),
+            bgl,
+            source,
+            pool: HashMap::new(),
+            used: HashSet::new(),
+            lut_cache: HashMap::new(),
+            frames: 0,
+            created: 0,
+        }
     }
 
     /// Clear pooled textures and cached LUT textures.
@@ -540,14 +554,26 @@ impl FxStage {
     }
 
     /// Start a frame: pooled textures of sizes no layer uses by [`end_frame`](Self::end_frame)
-    /// are released then.
+    /// are released then. Frames nest (a composite of several steps is one frame around the
+    /// layers of each step): the pool is trimmed when the outermost one ends.
     pub(crate) fn begin_frame(&mut self) {
-        self.used.clear();
+        if self.frames == 0 {
+            self.used.clear();
+        }
+        self.frames = self.frames.saturating_add(1);
     }
 
     pub(crate) fn end_frame(&mut self) {
-        let used = &self.used;
-        self.pool.retain(|k, _| used.contains(k));
+        self.frames = self.frames.saturating_sub(1);
+        if self.frames == 0 {
+            let used = &self.used;
+            self.pool.retain(|k, _| used.contains(k));
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn created(&self) -> u64 {
+        self.created
     }
 
     /// No working textures held.
@@ -575,6 +601,7 @@ impl FxStage {
             });
             let view = t.create_view(&Default::default());
             v.push((t, view));
+            self.created = self.created.saturating_add(1);
         }
         v.iter().take(n).cloned().collect()
     }

@@ -10,6 +10,90 @@ use super::{
 
 const LABEL_W: f32 = 132.0;
 
+/// Top-level export container in DaVinci Resolve style.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExportContainer {
+    Mp4,
+    QuickTime,
+    Mxf,
+    ImageSequence,
+    AudioOnly,
+}
+
+impl ExportContainer {
+    pub const ALL: [ExportContainer; 5] = [
+        ExportContainer::Mp4,
+        ExportContainer::QuickTime,
+        ExportContainer::Mxf,
+        ExportContainer::ImageSequence,
+        ExportContainer::AudioOnly,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ExportContainer::Mp4 => "MP4 (.mp4)",
+            ExportContainer::QuickTime => "QuickTime (.mov)",
+            ExportContainer::Mxf => "MXF OP1a (.mxf)",
+            ExportContainer::ImageSequence => "Image Sequence",
+            ExportContainer::AudioOnly => "Audio Only",
+        }
+    }
+
+    pub fn from_settings(s: &ExportSettings) -> Self {
+        if s.format.is_audio_only() {
+            ExportContainer::AudioOnly
+        } else if s.is_image_sequence() {
+            ExportContainer::ImageSequence
+        } else if s.format.is_mxf() {
+            ExportContainer::Mxf
+        } else if s.format.is_h26x() {
+            if s.multiplexer == Multiplexer::Mov {
+                ExportContainer::QuickTime
+            } else {
+                ExportContainer::Mp4
+            }
+        } else {
+            ExportContainer::QuickTime
+        }
+    }
+
+    pub fn codecs(self) -> Vec<(Format, &'static str)> {
+        match self {
+            ExportContainer::Mp4 => vec![
+                (Format::H264, "H.264"),
+                (Format::Hevc, "H.265 (HEVC)"),
+                (Format::Av1, "AV1"),
+            ],
+            ExportContainer::QuickTime => vec![
+                (Format::ProRes, "Apple ProRes"),
+                (Format::H264, "H.264"),
+                (Format::DnxHr, "Avid DNxHR"),
+                (Format::Apv, "APV"),
+                (Format::Mjpeg, "Motion JPEG"),
+            ],
+            ExportContainer::Mxf => vec![
+                (Format::MxfOp1a, "MXF OP1a (Avid DNxHR / ProRes / H.264)"),
+                (Format::MxfOpAtom, "MXF OP-Atom (Avid style)"),
+            ],
+            ExportContainer::ImageSequence => vec![
+                (Format::PngSequence, "PNG Sequence"),
+                (Format::TiffSequence, "TIFF Sequence"),
+                (Format::JpegSequence, "JPEG Sequence"),
+                (Format::ExrSequence, "OpenEXR Sequence"),
+                (Format::DpxSequence, "DPX Sequence"),
+                (Format::BmpSequence, "BMP Sequence"),
+                (Format::TgaSequence, "Targa Sequence"),
+            ],
+            ExportContainer::AudioOnly => vec![
+                (Format::Wav, "WAV (PCM)"),
+                (Format::Aac, "AAC (.m4a)"),
+                (Format::Flac, "FLAC (Lossless)"),
+                (Format::Aiff, "AIFF"),
+            ],
+        }
+    }
+}
+
 /// A labelled settings row.
 fn row<R>(ui: &mut egui::Ui, t: &Tokens, label: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.horizontal(|ui| {
@@ -28,6 +112,20 @@ pub(super) fn combo(ui: &mut egui::Ui, reg: &mut Reg, id: &str, selected: &str, 
 
 /// [`combo`] whose options carry why they are greyed out (label, `Some(reason)` when disabled).
 fn combo_why(ui: &mut egui::Ui, reg: &mut Reg, id: &str, selected: &str, options: &[(String, Option<&str>)], width: f32) -> Option<usize> {
+    combo_tips(ui, reg, id, selected, options, width, |_| None)
+}
+
+/// [`combo_why`] with a hover tip per option (`tip(i)`), also shown on the closed box while that
+/// option is selected.
+fn combo_tips(
+    ui: &mut egui::Ui,
+    reg: &mut Reg,
+    id: &str,
+    selected: &str,
+    options: &[(String, Option<&str>)],
+    width: f32,
+    tip: impl Fn(usize) -> Option<&'static str>,
+) -> Option<usize> {
     let mut chosen = None;
     // no row limit of our own: the list grows to the popup limit, so Frame Rate's last rates
     // (119.88, 120) show without scrolling (the default 200 px cut them off)
@@ -39,12 +137,20 @@ fn combo_why(ui: &mut egui::Ui, reg: &mut Reg, id: &str, selected: &str, options
                 Some(why) => resp.on_disabled_hover_text(*why),
                 None => resp,
             };
+            let resp = match tip(i) {
+                Some(t) => resp.on_hover_text(t),
+                None => resp,
+            };
             reg.add(format!("{id}.option.{i}"), resp.rect, label.clone());
             if resp.clicked() {
                 chosen = Some(i);
             }
         }
     });
+    let current = options.iter().position(|(l, _)| l == selected);
+    if let Some(t) = current.and_then(&tip) {
+        r.response.clone().on_hover_text(t);
+    }
     reg.add(id, r.response.rect, selected);
     chosen
 }
@@ -295,16 +401,49 @@ pub(super) fn settings_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: R
                     open_manager = true;
                 }
             });
-            row(ui, &t, tl!("Format"), |ui| {
-                // a format without an encoder here says why: H.265 and AV1 have hardware encoders only
-                let labels: Vec<(String, Option<&str>)> = Format::ALL.iter().map(|f| (f.label().to_string(), unavailable_why(*f))).collect();
-                if let Some(i) = combo_why(ui, &mut reg, "export.format", ex.settings.format.label(), &labels, ui.available_width() - 4.0) {
-                    let f = Format::ALL[i];
+            // Container selector (DaVinci Resolve style)
+            let cur_container = ExportContainer::from_settings(&ex.settings);
+            row(ui, &t, tl!("Container"), |ui| {
+                let container_opts: Vec<(String, bool)> = ExportContainer::ALL.iter().map(|c| (c.label().to_string(), true)).collect();
+                if let Some(i) = combo(ui, &mut reg, "export.container", cur_container.label(), &container_opts, ui.available_width() - 4.0) {
+                    let chosen = ExportContainer::ALL[i];
+                    if chosen != cur_container {
+                        let new_codec = chosen.codecs()[0].0;
+                        let keep = ex.settings.clone();
+                        let new_mux = match chosen {
+                            ExportContainer::Mp4 => Multiplexer::Mp4,
+                            ExportContainer::QuickTime => Multiplexer::Mov,
+                            _ => keep.multiplexer,
+                        };
+                        ex.settings = ExportSettings {
+                            format: new_codec,
+                            multiplexer: new_mux,
+                            frame_size: keep.frame_size,
+                            frame_rate: keep.frame_rate,
+                            effects: keep.effects,
+                            metadata: keep.metadata,
+                            ..Default::default()
+                        };
+                    }
+                }
+            });
+
+            // Codec selector within the selected container
+            row(ui, &t, tl!("Codec"), |ui| {
+                let available_codecs = cur_container.codecs();
+                let labels: Vec<(String, Option<&str>)> = available_codecs.iter().map(|(f, l)| (l.to_string(), unavailable_why(*f))).collect();
+                let current_label = available_codecs
+                    .iter()
+                    .find(|(f, _)| *f == ex.settings.format)
+                    .map(|(_, l)| *l)
+                    .unwrap_or_else(|| ex.settings.format.label());
+                if let Some(i) = combo_why(ui, &mut reg, "export.format", current_label, &labels, ui.available_width() - 4.0) {
+                    let f = available_codecs[i].0;
                     if f != ex.settings.format {
-                        // a format switch starts from that format's defaults (keeping size / rate / range)
                         let keep = ex.settings.clone();
                         ex.settings = ExportSettings {
                             format: f,
+                            multiplexer: keep.multiplexer,
                             frame_size: keep.frame_size,
                             frame_rate: keep.frame_rate,
                             effects: keep.effects,
@@ -506,11 +645,15 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
                 }
             } else {
                 row(ui, t, tl!("Profile"), |ui| {
-                    let o = [H264Profile::Baseline, H264Profile::Main, H264Profile::High];
-                    let labels: Vec<(String, bool)> = o.iter().map(|p| (p.label().to_string(), true)).collect();
-                    if let Some(i) = combo(ui, reg, "export.video.profile", s.h264_profile.label(), &labels, 120.0) {
+                    let o = [H264Profile::Baseline, H264Profile::Main, H264Profile::High, H264Profile::High10];
+                    let labels: Vec<(String, Option<&str>)> = o.iter().map(|p| (p.label().to_string(), None)).collect();
+                    let tip = |i: usize| (o.get(i) == Some(&H264Profile::High10)).then(|| tl!("10-bit color"));
+                    if let Some(i) = combo_tips(ui, reg, "export.video.profile", s.h264_profile.label(), &labels, 120.0, tip) {
                         s.h264_profile = o[i];
                     }
+                });
+                row(ui, t, tl!("All Intra"), |ui| {
+                    check(ui, reg, "export.video.intraOnly", &mut s.h264_intra_only, tl!("Every frame a keyframe (edit-friendly, larger files)"));
                 });
                 row(ui, t, tl!("Level"), |ui| {
                     let levels: [Option<u8>; 13] =
@@ -564,15 +707,17 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
                 }
             }
             row(ui, t, tl!("Key Frame Distance"), |ui| {
-                let mut on = s.keyframe_distance.is_some();
-                if check(ui, reg, "export.video.keyframeOn", &mut on, "") {
-                    s.keyframe_distance = on.then_some(48);
-                }
-                if let Some(k) = s.keyframe_distance.as_mut() {
-                    let mut v = *k as f64;
-                    drag(ui, reg, "export.video.keyframe", &mut v, DragOptions { range: 1.0..=600.0, speed: 1.0, suffix: " frames", decimals: 0 });
-                    *k = v as u32;
-                }
+                ui.add_enabled_ui(hevc || !s.h264_intra_only, |ui| {
+                    let mut on = s.keyframe_distance.is_some();
+                    if check(ui, reg, "export.video.keyframeOn", &mut on, "") {
+                        s.keyframe_distance = on.then_some(48);
+                    }
+                    if let Some(k) = s.keyframe_distance.as_mut() {
+                        let mut v = *k as f64;
+                        drag(ui, reg, "export.video.keyframe", &mut v, DragOptions { range: 1.0..=600.0, speed: 1.0, suffix: " frames", decimals: 0 });
+                        *k = v as u32;
+                    }
+                });
             });
             // The system's hardware encoder where there is one (VideoToolbox on macOS, NVENC on NVIDIA
             // GPUs on Windows, VA-API on Linux); everything it does not take (two-pass, HDR, MXF) and
@@ -747,6 +892,7 @@ fn audio_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
         let fixed = audio_only || s.format.is_mxf();
         let cur = match s.audio_codec() {
             AudioCodec::Aac => "AAC",
+            AudioCodec::Mp3 => "MP3",
             AudioCodec::Flac => tl!("FLAC (lossless)"),
             _ => tl!("Uncompressed (PCM)"),
         };
@@ -781,12 +927,13 @@ fn audio_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
             s.audio.channels = [1, 2, 6][i.min(2)];
         }
     });
-    if s.audio_codec() == AudioCodec::Aac {
+    if matches!(s.audio_codec(), AudioCodec::Aac | AudioCodec::Mp3) {
         row(ui, t, tl!("Audio Bitrate"), |ui| {
-            let rates = [128u32, 160, 192, 256, 320];
+            // MP3 bit rates are Layer III's (16-24 kHz streams stop at 160 kbps)
+            let rates: &[u32] = if s.audio_codec() == AudioCodec::Mp3 { &[64, 96, 128, 160, 192, 256, 320] } else { &[128, 160, 192, 256, 320] };
             let labels: Vec<(String, bool)> = rates.iter().map(|r| (format!("{r} kbps"), true)).collect();
-            if let Some(i) = combo(ui, reg, "export.audio.bitrate", &format!("{} kbps", s.audio.bitrate_kbps), &labels, 120.0) {
-                s.audio.bitrate_kbps = rates[i];
+            if let Some(&r) = combo(ui, reg, "export.audio.bitrate", &format!("{} kbps", s.audio.bitrate_kbps), &labels, 120.0).and_then(|i| rates.get(i)) {
+                s.audio.bitrate_kbps = r;
             }
         });
     } else {
