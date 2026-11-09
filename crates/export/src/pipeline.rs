@@ -186,12 +186,21 @@ impl Drop for Pipeline {
 }
 
 impl Pipeline {
-    /// Free cached GPU compositor uploads/textures, decode caches, and recycled plane buffers.
+    /// Free cached GPU compositor uploads/textures, decode caches, and recycled plane buffers
+    /// when the export finishes.
     pub(crate) fn trim(&self) {
         if let Some(pool) = &self.renderer {
             pool.trim();
         }
         filmcraft_codecs::release_idle();
+        filmcraft_frame::pool::trim_f32();
+        filmcraft_frame::pool::trim_planes();
+    }
+
+    /// Free completed/stale decoders (idle for >= 5s) and trim recycled float and plane shelves.
+    /// Active clip decoders are preserved to maintain forward linear decoding continuity.
+    pub(crate) fn trim_stale(&self) {
+        filmcraft_codecs::release_stale(std::time::Duration::from_secs(5));
         filmcraft_frame::pool::trim_f32();
         filmcraft_frame::pool::trim_planes();
     }

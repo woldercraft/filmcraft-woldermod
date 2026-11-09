@@ -117,13 +117,15 @@ pub enum ColorConversion {
 }
 
 /// Acceleration buffer / prefetching depth for video export and proxying.
-/// Auto = large prefetch buffer (32–48 frames) to saturate hardware video encoders and keep
-/// decoding pipelines fed continuously without stalling. Off = classic lockstep buffer.
+/// Auto = high throughput buffer (16–32 frames) to saturate hardware video encoders.
+/// Low = bounded buffer (4–8 frames) for lower memory usage.
+/// Off = minimal lockstep buffer (2 frames).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RenderBuffer {
     #[default]
     Auto,
+    Low,
     Off,
 }
 

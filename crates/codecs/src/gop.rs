@@ -467,6 +467,22 @@ impl Pool {
         drop(released);
     }
 
+    /// Empty every cache that has not been accessed for at least `idle_threshold`.
+    /// Active caches (used recently) retain their decoders and frames so linear decoding continuity is preserved.
+    fn release_stale(&self, idle_threshold: Duration) {
+        let all: Vec<Arc<Shared>> = self.caches.lock().unwrap_or_else(PoisonError::into_inner).iter().filter_map(Weak::upgrade).collect();
+        let mut released = Vec::new();
+        for c in &all {
+            if let Some(mut st) = try_state(c) {
+                if st.last_used.elapsed() >= idle_threshold {
+                    st.release_frames(self, || true);
+                    released.extend(st.release_decoder(self));
+                }
+            }
+        }
+        drop(released);
+    }
+
     /// Evict the frames of caches idle for [`RECENT`], least recently used first, down to the
     /// budget. Caches in use keep theirs (each within its own budget): a frame evicted before it is shown costs a
     /// re-decode from the keyframe.
@@ -495,6 +511,11 @@ impl Pool {
 /// asked again.
 pub fn release_idle() {
     Pool::global().release_idle();
+}
+
+/// Free decoded frames and decoders for caches that have been inactive for at least `idle_threshold`.
+pub fn release_stale(idle_threshold: Duration) {
+    Pool::global().release_stale(idle_threshold);
 }
 
 /// Caches that hold a decoder right now, process-wide (`perf.stats`).

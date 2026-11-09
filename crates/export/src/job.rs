@@ -72,7 +72,7 @@ use rayon::prelude::*;
 use crate::audio_out::AudioOut;
 use crate::mxf_out::{MxfMux, MxfSetup};
 use crate::pipeline::Pipeline;
-use crate::settings::{AudioCodec, BitrateMode, ColorConversion, GpuRendering, HardwareEncoding, RenderBuffer};
+use crate::settings::{AudioCodec, BitrateMode, ColorConversion, RenderBuffer};
 use crate::{
     AudioEncoder, ColorSignal, EncodedPacket, EncoderFactory, EncoderFrame, ExportError, ExportSettings, Format, H264Pass, Out, PrepareAhead, Progress, Report,
     Result, Stage, VideoEncoder, audio_factories, export_range, frame_span, note_stage, timed, video_factories,
@@ -354,12 +354,10 @@ impl Exporter {
             f0,
             f1,
             next: f0,
-            batch: if settings.render_buffer == RenderBuffer::Auto && (settings.hardware_encoding == HardwareEncoding::Auto || settings.gpu_rendering == GpuRendering::Auto) {
-                // Optimal batch: saturate hardware encoder & GPU pipelines (4-12 frames)
-                // without hoarding tens of uncompressed raw frames in memory.
-                (rayon::current_num_threads()).clamp(4, 12) as i64
-            } else {
-                rayon::current_num_threads().clamp(2, 8) as i64
+            batch: match settings.render_buffer {
+                RenderBuffer::Auto => (rayon::current_num_threads() * 2).clamp(16, 32) as i64,
+                RenderBuffer::Low => rayon::current_num_threads().clamp(4, 8) as i64,
+                RenderBuffer::Off => 2,
             },
             overlap: true,
             budget: safe_in_flight_budget(),
@@ -643,8 +641,8 @@ impl Exporter {
                 Encoded::Done => {
                     progress.done.fetch_add((end - f) as u64, Ordering::Relaxed);
                     self.next = end;
-                    if !self.settings.part_of_batch {
-                        self.pipe.trim();
+                    if !self.settings.part_of_batch && (self.next - self.f0) % 120 < (end - f) {
+                        self.pipe.trim_stale();
                         crate::trim_heap();
                     }
                     Ok(Step::Progress)
@@ -680,8 +678,8 @@ impl Exporter {
                 }
                 // Periodic memory hygiene: evict completed source decoders and free idle frame shelves
                 // so long timeline exports across multiple video files don't accumulate gigabytes of RAM.
-                if !self.settings.part_of_batch {
-                    self.pipe.trim();
+                if !self.settings.part_of_batch && (self.next - self.f0) % 120 < (end - f) {
+                    self.pipe.trim_stale();
                     crate::trim_heap();
                 }
                 Ok(Step::Progress)

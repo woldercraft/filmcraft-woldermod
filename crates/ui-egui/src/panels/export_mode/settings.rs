@@ -841,12 +841,17 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
     }
     row(ui, t, tl!("Pipeline Buffer"), |ui| {
         let options = [
-            ("Auto (Pre-fetching + Búfer amplio GPU)", filmcraft_export::RenderBuffer::Auto),
-            ("Off (Búfer clásico)", filmcraft_export::RenderBuffer::Off),
+            ("Auto (Alto rendimiento: 16-32 fotogramas)", filmcraft_export::RenderBuffer::Auto),
+            ("Bajo (Ahorro de RAM: 4-8 fotogramas)", filmcraft_export::RenderBuffer::Low),
+            ("Desactivado (Lote mínimo: 2 fotogramas)", filmcraft_export::RenderBuffer::Off),
         ];
-        let cur = if s.render_buffer == filmcraft_export::RenderBuffer::Auto { options[0].0 } else { options[1].0 };
+        let cur = match s.render_buffer {
+            filmcraft_export::RenderBuffer::Auto => options[0].0,
+            filmcraft_export::RenderBuffer::Low => options[1].0,
+            filmcraft_export::RenderBuffer::Off => options[2].0,
+        };
         let labels: Vec<(String, bool)> = options.iter().map(|(l, _)| (l.to_string(), true)).collect();
-        if let Some(i) = combo(ui, reg, "export.video.renderBuffer", cur, &labels, 260.0) {
+        if let Some(i) = combo(ui, reg, "export.video.renderBuffer", cur, &labels, 280.0) {
             s.render_buffer = options[i].1;
         }
     });
