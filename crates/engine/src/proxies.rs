@@ -107,6 +107,7 @@ struct Dest<'a> {
     file: Option<Arc<std::fs::File>>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn transcode_with_file(
     clip: &MediaClip,
     name: &str,

@@ -473,11 +473,11 @@ impl Pool {
         let all: Vec<Arc<Shared>> = self.caches.lock().unwrap_or_else(PoisonError::into_inner).iter().filter_map(Weak::upgrade).collect();
         let mut released = Vec::new();
         for c in &all {
-            if let Some(mut st) = try_state(c) {
-                if st.last_used.elapsed() >= idle_threshold {
-                    st.release_frames(self, || true);
-                    released.extend(st.release_decoder(self));
-                }
+            if let Some(mut st) = try_state(c)
+                && st.last_used.elapsed() >= idle_threshold
+            {
+                st.release_frames(self, || true);
+                released.extend(st.release_decoder(self));
             }
         }
         drop(released);

@@ -459,6 +459,7 @@ impl MediaPool {
 }
 
 /// Implements [`filmcraft_render::SourceProvider`] over the pool for one project snapshot.
+#[derive(Clone)]
 pub struct PoolProvider {
     pub pool: Arc<MediaPool>,
     pub project: Arc<Project>,
@@ -466,9 +467,9 @@ pub struct PoolProvider {
     /// Ignore proxies (export always renders full resolution).
     pub full_res: bool,
     /// Items asked for so far, when recording ([`PoolProvider::recording`]).
-    used: Option<Mutex<BTreeSet<ItemId>>>,
+    used: Option<Arc<Mutex<BTreeSet<ItemId>>>>,
     /// Per media item, its own copy or None to share the pool's source ([`PoolProvider::own_sources`]).
-    own: Option<Mutex<HashMap<ItemId, Option<SharedSource>>>>,
+    own: Option<Arc<Mutex<HashMap<ItemId, Option<SharedSource>>>>>,
 }
 
 impl PoolProvider {
@@ -476,14 +477,14 @@ impl PoolProvider {
     /// instead of the source the monitors read: a background job then never makes them wait for
     /// its frames, or seek their decoder away from the playhead. The copies close with the provider.
     pub fn own_sources(mut self) -> Self {
-        self.own = self.full_res.then(Mutex::default);
+        self.own = self.full_res.then(|| Arc::new(Mutex::default()));
         self
     }
 
     /// This provider, remembering the items it is asked for so [`PoolProvider::offline_used`] can
     /// tell which of them rendered offline.
     pub fn recording(mut self) -> Self {
-        self.used = Some(Mutex::new(BTreeSet::new()));
+        self.used = Some(Arc::new(Mutex::new(BTreeSet::new())));
         self
     }
 
@@ -535,6 +536,17 @@ impl filmcraft_render::SourceProvider for PoolProvider {
             }
         }
         if self.full_res { self.pool.full_res_source(&self.project, item, &*self.services) } else { self.pool.source_for(&self.project, item, &*self.services) }
+    }
+
+    fn isolate(&self) -> Option<Box<dyn filmcraft_render::SourceProvider>> {
+        Some(Box::new(PoolProvider {
+            pool: self.pool.clone(),
+            project: self.project.clone(),
+            services: self.services.clone(),
+            full_res: self.full_res,
+            used: self.used.clone(),
+            own: self.own.as_ref().map(|_| Arc::new(Mutex::new(HashMap::new()))),
+        }))
     }
 }
 

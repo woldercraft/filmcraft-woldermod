@@ -98,11 +98,11 @@ fn safe_in_flight_budget() -> u64 {
         if let Ok(content) = std::fs::read_to_string("/proc/meminfo") {
             let mut mem_available = 0u64;
             for line in content.lines() {
-                if let Some(rest) = line.strip_prefix("MemAvailable:") {
-                    if let Ok(kb) = rest.trim().trim_end_matches("kB").trim().parse::<u64>() {
-                        mem_available = kb;
-                        break;
-                    }
+                if let Some(rest) = line.strip_prefix("MemAvailable:")
+                    && let Ok(kb) = rest.trim().trim_end_matches("kB").trim().parse::<u64>()
+                {
+                    mem_available = kb;
+                    break;
                 }
             }
             if mem_available > 0 {

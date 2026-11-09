@@ -161,8 +161,13 @@ pub fn segmented_export(
     std::thread::scope(|scope| {
         for (k, c_settings) in chunk_settings_list.into_iter().enumerate() {
             let chunk_results = chunk_results.clone();
+            let seg_sources = sources.isolate();
             scope.spawn(move || {
-                let r = export_here(project, seq, &c_settings, sources, progress);
+                let provider: &dyn SourceProvider = match &seg_sources {
+                    Some(s) => &**s,
+                    None => sources,
+                };
+                let r = export_here(project, seq, &c_settings, provider, progress);
                 chunk_results.lock().unwrap_or_else(PoisonError::into_inner)[k] = Some(r);
             });
         }
@@ -277,6 +282,43 @@ mod tests {
         assert_eq!(f.tracks[vt].samples.len() as u64, rep.frames);
         let at = f.track_of_kind(filmcraft_isobmff::TrackKind::Audio).expect("audio track");
         assert!(!f.tracks[at].samples.is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn segmented_export_isolates_sources_per_worker_thread() {
+        use std::sync::atomic::AtomicUsize;
+        struct TestProvider {
+            inner: filmcraft_render::SourceMap,
+            isolates: Arc<AtomicUsize>,
+        }
+        impl filmcraft_render::SourceProvider for TestProvider {
+            fn source(&self, item: ItemId) -> Option<filmcraft_media::SharedSource> {
+                self.inner.source(item)
+            }
+            fn isolate(&self) -> Option<Box<dyn filmcraft_render::SourceProvider>> {
+                self.isolates.fetch_add(1, Ordering::SeqCst);
+                Some(Box::new(TestProvider {
+                    inner: self.inner.clone(),
+                    isolates: self.isolates.clone(),
+                }))
+            }
+        }
+        let (p, seq, m) = project();
+        let isolates = Arc::new(AtomicUsize::new(0));
+        let provider = TestProvider { inner: m, isolates: isolates.clone() };
+        let path = tmp("seg_isolate.mov");
+        let settings = ExportSettings {
+            format: Format::ProRes,
+            path: path.clone(),
+            segments: 3,
+            include_audio: false,
+            ..Default::default()
+        };
+        let rep = export(&p, seq, &settings, &provider, &Progress::default()).expect("export");
+        assert!(rep.frames > 0);
+        // 3 parallel segments should each have called isolate() once
+        assert_eq!(isolates.load(Ordering::SeqCst), 3);
         let _ = std::fs::remove_file(&path);
     }
 }
