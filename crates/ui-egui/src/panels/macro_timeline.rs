@@ -42,7 +42,7 @@ enum MacroDrag {
 }
 
 fn macro_drag_id() -> egui::Id {
-    egui::Id::new("filmcraft-macro-timeline-drag")
+    egui::Id::unique("filmcraft-macro-timeline-drag")
 }
 
 fn lighten(c: Color32, factor: f32) -> Color32 {
@@ -194,7 +194,7 @@ fn render_macro_timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, 
         let close_w = 22.0;
         rx -= close_w;
         let close_rect = Rect::from_min_size(pos2(rx, header_rect.min.y + 3.0), vec2(close_w, header_h - 6.0));
-        let close_resp = ui.interact(close_rect, egui::Id::new("macro-tl-close-btn"), Sense::click())
+        let close_resp = ui.interact(close_rect, egui::Id::unique("macro-tl-close-btn"), Sense::click())
             .on_hover_text("Hide Macro Timeline");
         if close_resp.hovered() {
             p.rect_filled(close_rect, 3.0, t.hover);
@@ -212,7 +212,7 @@ fn render_macro_timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, 
     let fast_btn_w = 105.0;
     rx -= fast_btn_w;
     let fast_btn_rect = Rect::from_min_size(pos2(rx, header_rect.min.y + 3.0), vec2(fast_btn_w, header_h - 6.0));
-    let fast_resp = ui.interact(fast_btn_rect, egui::Id::new("macro-tl-fast-toggle"), Sense::click());
+    let fast_resp = ui.interact(fast_btn_rect, egui::Id::unique("macro-tl-fast-toggle"), Sense::click());
     if fast_resp.clicked() {
         app.ui.timeline.fast_selection_mode = !app.ui.timeline.fast_selection_mode;
     }
@@ -241,7 +241,7 @@ fn render_macro_timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, 
     for &(label, offset, bw) in &nudge_btns {
         mid_x -= bw + 4.0;
         let btn_r = Rect::from_min_size(pos2(mid_x, header_rect.min.y + 3.0), vec2(bw, header_h - 6.0));
-        let bresp = ui.interact(btn_r, egui::Id::new(("macro-tl-nudge", label)), Sense::click());
+        let bresp = ui.interact(btn_r, egui::Id::unique(("macro-tl-nudge", label)), Sense::click());
         p.rect_filled(btn_r, 3.0, if bresp.hovered() { t.hover } else { t.panel_bg });
         p.text(btn_r.center(), Align2::CENTER_CENTER, label, Tokens::ui(10.0), t.text);
         if bresp.clicked() {
@@ -264,7 +264,7 @@ fn render_macro_timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, 
     let align_w = 95.0;
     mid_x -= align_w + 6.0;
     let align_r = Rect::from_min_size(pos2(mid_x, header_rect.min.y + 3.0), vec2(align_w, header_h - 6.0));
-    let align_resp = ui.interact(align_r, egui::Id::new("macro-tl-align-playhead"), Sense::click());
+    let align_resp = ui.interact(align_r, egui::Id::unique("macro-tl-align-playhead"), Sense::click());
     p.rect_filled(align_r, 3.0, if align_resp.hovered() { t.hover } else { t.panel_bg });
     p.text(align_r.center(), Align2::CENTER_CENTER, "⏱ Al Cabezal", Tokens::ui(10.0), Color32::from_rgb(100, 200, 255));
     if align_resp.clicked() {
@@ -365,7 +365,7 @@ fn render_macro_timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, 
         cur_s += step_secs;
     }
 
-    let ruler_resp = ui.interact(ruler_rect, egui::Id::new("macro-timeline-ruler"), Sense::click_and_drag());
+    let ruler_resp = ui.interact(ruler_rect, egui::Id::unique("macro-timeline-ruler"), Sense::click_and_drag());
     if (ruler_resp.clicked() || ruler_resp.dragged()) && let Some(p_pos) = pointer_pos {
         let target_tick = x_to_tick(p_pos.x);
         let _ = app.session.execute("playhead.set", json!({ "time": target_tick.0 }));
@@ -377,7 +377,7 @@ fn render_macro_timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, 
     }
 
     // 2. Tracks Canvas Interaction
-    let tracks_resp = ui.interact(tracks_canvas, egui::Id::new("macro-timeline-tracks"), Sense::click_and_drag());
+    let tracks_resp = ui.interact(tracks_canvas, egui::Id::unique("macro-timeline-tracks"), Sense::click_and_drag());
 
     // Hit test: user clicked on any MacroBlock
     let hit_block = pointer_pos.and_then(|p_pos| {

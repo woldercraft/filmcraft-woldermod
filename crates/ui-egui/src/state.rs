@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::dock::{DockNode, PanelKind};
+use crate::dock::PanelKind;
 use crate::icons::Icon;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -69,25 +69,26 @@ impl Tool {
             Tool::VerticalType => "Vertical Type Tool",
         }
     }
-    pub fn shortcut(self) -> &'static str {
-        match self {
-            Tool::Selection => "V",
-            Tool::TrackSelectForward => "A",
-            Tool::TrackSelectBackward => "Shift+A",
-            Tool::Ripple => "B",
-            Tool::Rolling => "N",
-            Tool::RateStretch => "R",
-            Tool::Remix => "",
-            Tool::Razor => "C",
-            Tool::Slip => "Y",
-            Tool::Slide => "U",
-            Tool::Pen => "P",
-            Tool::Rectangle | Tool::Ellipse => "",
-            Tool::Hand => "H",
-            Tool::Zoom => "Z",
-            Tool::Type => "T",
-            Tool::VerticalType => "",
-        }
+    /// Shortcut command used by the keyboard editor for this tool, if any.
+    pub fn command_id(self) -> Option<&'static str> {
+        Some(match self {
+            Tool::Selection => "tool.selection",
+            Tool::TrackSelectForward => "tool.trackSelectForward",
+            Tool::TrackSelectBackward => "tool.trackSelectBackward",
+            Tool::Ripple => "tool.ripple",
+            Tool::Rolling => "tool.rolling",
+            Tool::RateStretch => "tool.rateStretch",
+            Tool::Remix => "tool.remix",
+            Tool::Razor => "tool.razor",
+            Tool::Slip => "tool.slip",
+            Tool::Slide => "tool.slide",
+            Tool::Pen => "tool.pen",
+            Tool::Rectangle | Tool::Ellipse => return None,
+            Tool::Hand => "tool.hand",
+            Tool::Zoom => "tool.zoom",
+            Tool::Type => "tool.type",
+            Tool::VerticalType => "tool.verticalType",
+        })
     }
     pub fn icon(self) -> Icon {
         match self {
@@ -194,7 +195,13 @@ pub struct TimelineView {
     #[serde(default)]
     pub thumbnail_mode: ThumbnailMode,
     pub show_waveforms: bool,
-    /// Follow playhead during playback (page scroll).
+    /// The wrench menu's Show Video Names / Show Audio Names: the name strip of the clips on video
+    /// and audio tracks (on by default; off leaves the clip picture or waveform uncovered).
+    #[serde(default = "yes")]
+    pub show_video_names: bool,
+    #[serde(default = "yes")]
+    pub show_audio_names: bool,
+    /// Follow during playback (page scroll).
     pub follow: bool,
     pub fit_pending: bool,
     /// The playhead the view last saw: a jump while stopped (Home, End, edit points) scrolls to it.
@@ -242,6 +249,8 @@ impl Default for TimelineView {
             show_thumbnails: true,
             thumbnail_mode: ThumbnailMode::Head,
             show_waveforms: true,
+            show_video_names: true,
+            show_audio_names: true,
             follow: true,
             fit_pending: true,
             seen_playhead: None,
@@ -328,6 +337,8 @@ pub struct MonitorView {
     /// length (start, end), set with the zoom bar under the ruler; None = all of it.
     pub time_zoom: Option<[f64; 2]>,
     pub safe_margins: bool,
+    /// Transparency Grid: a checkerboard behind the picture shows its transparent areas.
+    pub transparency_grid: bool,
     pub show_transport: bool,
     /// Transport buttons hidden through the monitor's Button Editor. Stored per monitor.
     pub transport_hidden: Vec<String>,
@@ -354,9 +365,11 @@ impl Default for MonitorView {
             pan: [0.0, 0.0],
             time_zoom: None,
             safe_margins: false,
+            transparency_grid: false,
             show_transport: true,
-            // The optional Loop button is available from the editor without altering default layouts.
-            transport_hidden: vec!["playback.loop".into()],
+            // Optional buttons (Loop, Go to Previous/Next Edit Point) are available from the editor
+            // without altering default layouts, as in Premiere.
+            transport_hidden: vec!["playback.loop".into(), "playhead.prevEdit".into(), "playhead.nextEdit".into()],
             multicam: false,
             display: DisplayMode::Composite,
             compare_ref: None,
@@ -441,13 +454,20 @@ pub struct KeyframeRef {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UiState {
     #[serde(default)]
+    pub markers_panel: crate::panels::markers_panel::State,
+    #[serde(skip)]
+    pub palette_manager: Option<crate::panels::palette_manager::Draft>,
+    #[serde(skip)]
+    pub marker_properties: Option<crate::panels::marker_properties::Draft>,
+    #[serde(skip)]
+    pub custom_label_color: Option<crate::panels::custom_colors::Draft>,
+    #[serde(default)]
     pub language: crate::i18n::Language,
     pub tool: Tool,
     pub mode: Mode,
     pub workspace: String,
-    pub dock: DockNode,
-    #[serde(default)]
-    pub floating: Vec<crate::dock::Floating>,
+    /// The panel arrangement in use: craft-ui's frame tree and floating windows.
+    pub dock: crate::dock::Layout,
     /// Where each panel closed while floating was ([x, y, width, height]): opening it again
     /// brings it back there, floating, instead of docked (#1985).
     #[serde(default)]
@@ -463,7 +483,7 @@ pub struct UiState {
     pub expanded_bins: Vec<u64>,
     /// Expanded folders in the Effects panel.
     pub expanded_fx: Vec<String>,
-    /// Effects panel: the Lumetri Presets folder shown as a thumbnail grid (wide panel).
+    /// Effects panel: the Color Grading Presets folder shown as a thumbnail grid (wide panel).
     #[serde(default)]
     pub lumetri_grid_folder: Option<String>,
     /// Collapsed effect sections in Effect Controls ("clip:index").
@@ -480,8 +500,18 @@ pub struct UiState {
     #[serde(default = "shown")]
     pub show_status_bar: bool,
     pub dark: bool,
-    /// Lumetri scopes visible in the Program monitor area.
+    /// Color Grading scopes visible in the Program monitor area.
     pub show_scopes: bool,
+    /// Cinema mode: the Program monitor fills the whole window and the cursor is hidden. Only
+    /// `view.fullScreenProgram` turns it on, so it is not part of the saved state.
+    #[serde(skip)]
+    pub fullscreen_program: bool,
+    /// The window was already fullscreen before cinema mode started.
+    #[serde(skip)]
+    pub cinema_was_fullscreen: bool,
+    /// The panel that had focus before cinema mode started.
+    #[serde(skip)]
+    pub cinema_prev_focus: Option<PanelKind>,
     /// Transient status line shown in the footer.
     pub status: String,
     /// A link the web browser couldn't open, shown with its address until closed
@@ -498,6 +528,36 @@ pub struct UiState {
     /// Essential Sound sub-tab: "Edit" or "Browse".
     #[serde(default)]
     pub essential_sound_tab: String,
+    /// Active Lumetri color node index for node-based grading (0-indexed).
+    #[serde(default)]
+    pub active_color_node: usize,
+    /// User custom labels for color nodes (`clip:node_index` -> label).
+    #[serde(default)]
+    pub color_node_labels: std::collections::HashMap<String, String>,
+    /// Freely movable positions for color nodes in graph (`clip:node_index` -> [x, y] relative to canvas).
+    #[serde(default)]
+    pub color_node_positions: std::collections::HashMap<String, [f32; 2]>,
+    /// Pan offset for ColorNodes graph canvas [x, y].
+    #[serde(default)]
+    pub color_node_pan: [f32; 2],
+    /// Zoom level for ColorNodes graph canvas (1.0 = 100%).
+    #[serde(default = "default_node_zoom")]
+    pub color_node_zoom: f32,
+    /// Active tool in Lumetri Color panel (e.g. "Basic Correction", "Color Wheels & Match", etc.).
+    #[serde(default = "default_lumetri_tool")]
+    pub lumetri_active_tool: String,
+    /// Secondary active tool for dual/split palette view in Lumetri Color panel.
+    #[serde(default = "default_lumetri_secondary_tool")]
+    pub lumetri_secondary_tool: String,
+    /// Dual/split palette view enabled in Lumetri Color panel.
+    #[serde(default)]
+    pub lumetri_dual_view: bool,
+    /// Custom order of Lumetri palette tool buttons.
+    #[serde(default = "default_lumetri_tool_order")]
+    pub lumetri_tool_order: Vec<String>,
+    /// Location of the Lumetri palette tool bar ("top", "bottom", "left").
+    #[serde(default = "default_lumetri_bar_pos")]
+    pub lumetri_bar_pos: String,
     /// Text to Speech panel: the script and voice settings being written or edited.
     #[serde(default)]
     pub tts: crate::panels::tts::TtsDraft,
@@ -535,6 +595,9 @@ pub struct UiState {
     /// Audio Track Mixer ▸ Meter Input(s) Only: record-armed track meters show the recording input.
     #[serde(default)]
     pub mixer_meter_input_only: bool,
+    /// Audio Clip Mixer: whether controls affect the entire track or only the clip at the playhead.
+    #[serde(default)]
+    pub clip_mixer_target_track: bool,
     /// Audio Gain dialog draft (mode, dB values).
     #[serde(default)]
     pub audio_gain: AudioGainDraft,
@@ -544,6 +607,10 @@ pub struct UiState {
     /// Delete Tracks dialog draft.
     #[serde(default)]
     pub delete_tracks: DeleteTracksDraft,
+    /// File ▸ Export ▸ Captions…: the file format chosen last (its extension, e.g. `vtt`), offered
+    /// first the next time.
+    #[serde(default)]
+    pub caption_export_format: Option<String>,
     /// Sequence Settings dialog draft.
     #[serde(default)]
     pub sequence_settings: SequenceSettingsDraft,
@@ -610,7 +677,7 @@ pub struct UiState {
     /// `panels::graphics_templates`.
     #[serde(default)]
     pub gfx_templates: crate::panels::graphics_templates::GfxTemplatesState,
-    /// Lumetri Scopes, Timecode, Events, Progress and Reference Monitor settings. See
+    /// Video Scopes, Timecode, Events, Progress and Reference Monitor settings. See
     /// `panels::panel_state`.
     #[serde(default)]
     pub panels: crate::panels::panel_state::PanelsState,
@@ -764,13 +831,29 @@ impl Default for LinkMediaDraft {
 }
 
 /// Clip ▸ Proxy ▸ Create Proxies….
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProxyDraft {
     pub items: Vec<u64>,
     pub preset: String,
     /// Empty = a Proxies folder next to the original media.
     pub destination: String,
+    #[serde(default = "yes")]
+    pub render_buffer: bool,
+    #[serde(default = "default_concurrency")]
+    pub concurrency: usize,
+}
+
+impl Default for ProxyDraft {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            preset: String::new(),
+            destination: String::new(),
+            render_buffer: true,
+            concurrency: 2,
+        }
+    }
 }
 
 /// File ▸ Project Manager….
@@ -876,6 +959,8 @@ pub struct SequenceSettingsDraft {
     /// File ▸ New ▸ Sequence…: the dialog makes a new sequence (`file.newSequence`) with these
     /// settings and `video_tracks` / `audio_tracks` tracks, instead of changing the active one.
     pub new_sequence: bool,
+    /// New Sequence: the bin the Project panel was showing, which the new sequence lands in.
+    pub bin: Option<u64>,
     pub video_tracks: u32,
     pub audio_tracks: u32,
     pub fps_num: i64,
@@ -884,6 +969,8 @@ pub struct SequenceSettingsDraft {
     pub height: u32,
     pub scale_motion: bool,
     pub drop_frame: bool,
+    /// Video Display Format: Timecode, Feet + Frames 35mm / 16mm or Frames.
+    pub display: filmcraft_time::TimeDisplay,
     pub mix: String,
     pub sample_rate: u32,
     pub max_render_quality: bool,
@@ -898,6 +985,7 @@ impl Default for SequenceSettingsDraft {
             tab: "general".into(),
             name: String::new(),
             new_sequence: false,
+            bin: None,
             video_tracks: 3,
             audio_tracks: 3,
             fps_num: 24_000,
@@ -906,6 +994,7 @@ impl Default for SequenceSettingsDraft {
             height: 1080,
             scale_motion: true,
             drop_frame: false,
+            display: filmcraft_time::TimeDisplay::Timecode,
             mix: "Stereo".into(),
             sample_rate: 48_000,
             max_render_quality: false,
@@ -957,6 +1046,14 @@ pub struct GfxEdit {
     pub layer: usize,
     pub caret: usize,
     pub anchor: usize,
+    /// Stable layer uid (`0` = the project layer has none).
+    #[serde(default)]
+    pub uid: u64,
+    /// Compact identity of a uid-less layer, so the edit target follows its layer through a
+    /// reorder, a deletion below it, or undo/redo instead of editing whatever moves into the
+    /// numeric index.
+    #[serde(default)]
+    pub fingerprint: u64,
 }
 
 fn shown() -> bool {
@@ -967,18 +1064,53 @@ fn captions_tab() -> String {
     "Captions".into()
 }
 
+fn default_node_zoom() -> f32 {
+    1.0
+}
+
+fn default_lumetri_tool() -> String {
+    "Basic Correction".into()
+}
+
+fn default_lumetri_secondary_tool() -> String {
+    "Curves".into()
+}
+
+fn default_lumetri_tool_order() -> Vec<String> {
+    vec![
+        "Basic Correction".into(),
+        "Color Wheels & Match".into(),
+        "Curves".into(),
+        "Power Windows / Máscara".into(),
+        "HSL Secondary".into(),
+        "Creative".into(),
+        "Vignette".into(),
+    ]
+}
+
+fn default_lumetri_bar_pos() -> String {
+    "top".into()
+}
+
 fn yes() -> bool {
     true
+}
+
+fn default_concurrency() -> usize {
+    2
 }
 
 impl Default for UiState {
     fn default() -> Self {
         Self {
+            marker_properties: None,
+            markers_panel: Default::default(),
+            palette_manager: None,
+            custom_label_color: None,
             language: crate::i18n::Language::default(),
             tool: Tool::Selection,
             mode: Mode::Edit,
             workspace: "Editing".into(),
-            floating: vec![],
             closed_floating: vec![],
             dock: crate::dock::workspace("Editing"),
             focused: PanelKind::Timeline,
@@ -1002,6 +1134,16 @@ impl Default for UiState {
             eyedropper: None,
             keyframe_selection: Vec::new(),
             essential_sound_tab: "Edit".into(),
+            active_color_node: 0,
+            color_node_labels: std::collections::HashMap::new(),
+            color_node_positions: std::collections::HashMap::new(),
+            color_node_pan: [0.0, 0.0],
+            color_node_zoom: 1.0,
+            lumetri_active_tool: default_lumetri_tool(),
+            lumetri_secondary_tool: default_lumetri_secondary_tool(),
+            lumetri_dual_view: false,
+            lumetri_tool_order: default_lumetri_tool_order(),
+            lumetri_bar_pos: default_lumetri_bar_pos(),
             tts: Default::default(),
             export: Default::default(),
             project_browser: Default::default(),
@@ -1013,10 +1155,12 @@ impl Default for UiState {
             mixer_fx_open: false,
             mixer_hidden: Vec::new(),
             mixer_meter_input_only: false,
+            clip_mixer_target_track: false,
             settings: None,
             audio_gain: AudioGainDraft::default(),
             add_tracks: AddTracksDraft::default(),
             delete_tracks: DeleteTracksDraft::default(),
+            caption_export_format: None,
             sequence_settings: SequenceSettingsDraft::default(),
             transition_duration: TransitionDurationDraft::default(),
             gfx_edit: None,
@@ -1042,6 +1186,9 @@ impl Default for UiState {
             keys: Default::default(),
             project_panel: Default::default(),
             media_browser: Default::default(),
+            fullscreen_program: false,
+            cinema_was_fullscreen: false,
+            cinema_prev_focus: None,
         }
     }
 }

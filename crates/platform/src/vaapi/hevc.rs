@@ -10,6 +10,7 @@
 //!
 //! Safe code; compiled on every target so its logic is tested everywhere.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use filmcraft_bitstream::{length_prefixed_nals, unescape_rbsp};
@@ -53,6 +54,10 @@ struct Pending {
     any_b: bool,
 }
 
+/// Decoded pictures kept in flight on the GPU before syncing and reading back, so the hardware
+/// decoder works on the next pictures while the CPU reads back and converts the previous one.
+pub const PIPELINE_DEPTH: usize = 4;
+
 /// HEVC front end of a stateless hardware decoder (see the module docs).
 pub struct Front<A: Accel> {
     accel: A,
@@ -63,6 +68,10 @@ pub struct Front<A: Accel> {
     spss: Vec<Option<Arc<Sps>>>,
     ppss: Vec<Option<Arc<Pps>>>,
     dpb: Dpb<Surface>,
+    /// Pictures that have left the DPB in output order and are still decoding on the GPU.
+    ready: VecDeque<Output<Surface>>,
+    /// Pictures with `pts < skip_before_pts` skip GPU->CPU readback when leaving `ready`.
+    skip_before_pts: i64,
     poc_state: PocState,
     active_sps: Option<Arc<Sps>>,
     pending: Option<Pending>,
@@ -92,6 +101,8 @@ impl<A: Accel> Front<A> {
             spss: vec![None; 16],
             ppss: vec![None; 64],
             dpb: Dpb::default(),
+            ready: VecDeque::new(),
+            skip_before_pts: i64::MIN,
             poc_state: PocState::default(),
             active_sps: None,
             pending: None,
@@ -128,7 +139,8 @@ impl<A: Accel> Front<A> {
         self.submit_pending(&mut frames)?;
         let mut outs = Vec::new();
         self.dpb.flush(&mut outs);
-        self.read_out(outs, &mut frames)?;
+        self.ready.extend(outs);
+        self.drain_ready(0, &mut frames)?;
         self.first_picture = true;
         Ok(frames)
     }
@@ -136,6 +148,8 @@ impl<A: Accel> Front<A> {
     /// Forget every picture (after a seek).
     pub fn reset(&mut self) {
         self.dpb = Dpb::default();
+        self.ready.clear();
+        self.skip_before_pts = i64::MIN;
         self.poc_state = PocState::default();
         self.active_sps = None;
         self.pending = None;
@@ -144,9 +158,23 @@ impl<A: Accel> Front<A> {
         self.after_eos = false;
     }
 
-    /// Read back the pictures the DPB output, right away: a surface leaving the DPB is reused.
+    /// Skip reading back pictures presented before `min_pts`.
+    pub fn set_skip_before(&mut self, min_pts: i64) {
+        self.skip_before_pts = min_pts;
+    }
+
+    /// Queue pictures that left the DPB and read back those past the in-flight pipeline depth.
     fn read_out(&mut self, outs: Vec<Output<Surface>>, frames: &mut Vec<DecodedFrame>) -> Result<()> {
-        for o in outs {
+        self.ready.extend(outs);
+        self.drain_ready(PIPELINE_DEPTH, frames)
+    }
+
+    fn drain_ready(&mut self, keep: usize, frames: &mut Vec<DecodedFrame>) -> Result<()> {
+        while self.ready.len() > keep {
+            let Some(o) = self.ready.pop_front() else { break };
+            if o.meta.pts < self.skip_before_pts {
+                continue;
+            }
             let frame = self.accel.read(o.frame.index).map_err(decode_err)?;
             frames.push(DecodedFrame { pts: o.meta.pts, frame, draft: false });
         }
@@ -185,7 +213,8 @@ impl<A: Accel> Front<A> {
     }
 
     fn handle_slice(&mut self, nal: &[u8], hdr: NalHeader, pts: i64, frames: &mut Vec<DecodedFrame>) -> Result<()> {
-        let rbsp = unescape_rbsp(nal.get(2..).unwrap_or_default());
+        let payload = nal.get(2..).unwrap_or_default();
+        let rbsp = unescape_rbsp(&payload[..payload.len().min(4096)]);
         let first = rbsp.first().is_some_and(|b| b & 0x80 != 0);
         if first {
             self.submit_pending(frames)?;
@@ -195,18 +224,22 @@ impl<A: Accel> Front<A> {
         }
         let (ppss, spss) = (&self.ppss, &self.spss);
         let prev = self.pending.as_ref().map(|p| &p.last);
-        let (sh, pps, sps) = SliceHeader::parse(
-            &rbsp,
-            hdr,
-            |id| {
-                let missing = |what: String| filmcraft_hevc::Error::MissingParameterSet(what);
-                let pps = ppss.get(id as usize).and_then(Option::as_ref).ok_or_else(|| missing(format!("PPS {id}")))?;
-                let sps = spss.get(pps.sps_id as usize).and_then(Option::as_ref).ok_or_else(|| missing(format!("SPS {}", pps.sps_id)))?;
-                Ok((pps.clone(), sps.clone()))
-            },
-            prev,
-        )
-        .map_err(decode_err)?;
+        let parse_hdr = |buf: &[u8]| {
+            SliceHeader::parse(
+                buf,
+                hdr,
+                |id| {
+                    let missing = |what: String| filmcraft_hevc::Error::MissingParameterSet(what);
+                    let pps = ppss.get(id as usize).and_then(Option::as_ref).ok_or_else(|| missing(format!("PPS {id}")))?;
+                    let sps = spss.get(pps.sps_id as usize).and_then(Option::as_ref).ok_or_else(|| missing(format!("SPS {}", pps.sps_id)))?;
+                    Ok((pps.clone(), sps.clone()))
+                },
+                prev,
+            )
+        };
+        let (sh, pps, sps) = parse_hdr(&rbsp)
+            .or_else(|e| if payload.len() > 4096 { parse_hdr(&unescape_rbsp(payload)) } else { Err(e) })
+            .map_err(decode_err)?;
         sps.check_supported().map_err(decode_err)?;
         pps.check_supported().map_err(decode_err)?;
         if first {
@@ -269,8 +302,17 @@ impl<A: Accel> Front<A> {
             self.dpb.bump_before_decode(&mut outs);
         }
         self.read_out(outs, frames)?;
+        while (0..self.accel.surfaces().len()).all(|i| self.dpb.entries.iter().any(|e| e.frame.index == i) || self.ready.iter().any(|o| o.frame.index == i)) {
+            if self.ready.is_empty() {
+                break;
+            }
+            let keep = self.ready.len() - 1;
+            self.drain_ready(keep, frames)?;
+        }
         let surfaces = self.accel.surfaces();
-        let target = (0..surfaces.len()).find(|&i| !self.dpb.entries.iter().any(|e| e.frame.index == i)).ok_or_else(|| decode_err("no free surface"))?;
+        let target = (0..surfaces.len())
+            .find(|&i| !self.dpb.entries.iter().any(|e| e.frame.index == i) && !self.ready.iter().any(|o| o.frame.index == i))
+            .ok_or_else(|| decode_err("no free surface"))?;
         let target_id = surfaces.get(target).copied().ok_or_else(|| decode_err("surface out of range"))?;
         let mut pic = picture_params(sps, pps, sh)?;
         pic.CurrPic = VAPictureHEVC { picture_id: target_id, pic_order_cnt: poc, flags: 0, va_reserved: [0; ffi::VA_PADDING_LOW] };

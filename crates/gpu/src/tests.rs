@@ -4,7 +4,7 @@ use filmcraft_render::Blend;
 use filmcraft_render::plan::execute_cpu;
 
 fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let instance = wgpu::Instance::default();
+    let instance = crate::adapter::native_instance();
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
     pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
 }
@@ -116,7 +116,8 @@ fn gpu_matches_cpu_plan() {
         1.0,
         24,
         filmcraft_time::FrameRate::FPS_24,
-    );
+    )
+    .unwrap();
     let rgba = Arc::new(VideoFrame::rgba8(320, 180, pixels));
     let (w, h) = (320usize, 180usize);
     let plan = FramePlan::Layers {
@@ -329,6 +330,56 @@ fn upload_cache_keeps_buffers_alive() {
     assert!(Arc::strong_count(&px) > 1, "cached upload must own its pixel buffer");
 }
 
+#[test]
+fn texture_pool_recycles_evicted_textures() {
+    let Some((dev, q)) = device() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let mut c = GpuCompositor::new(&dev, &q);
+    assert_eq!(c.textures_reused, 0);
+    // Composite 36 unique frames so eviction triggers (MAX_LOCAL_UPLOADS = 32)
+    for i in 0..36 {
+        let px = Arc::new(vec![i as u8; 16 * 8 * 4]);
+        let frame = Arc::new(VideoFrame { width: 16, height: 8, data: PixelData::Rgba8(px), ..(*yuv_frame(16, 8)).clone() });
+        let plan = FramePlan::Layers {
+            width: 16,
+            height: 8,
+            layers: vec![PlanLayer { frame, matrix: Affine::IDENTITY, opacity: 1.0, blend: Blend::Normal, fx: None, input: None }],
+        };
+        c.composite(&plan);
+    }
+    // Evicted textures were recycled instead of reallocated
+    assert!(c.textures_reused >= 3, "textures were reused from pool: {}", c.textures_reused);
+    assert_eq!(c.texture_pool_len(), 1);
+}
+
+#[test]
+fn uniform_buffers_are_reused_across_frames() {
+    let Some((dev, q)) = device() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let mut c = GpuCompositor::new(&dev, &q);
+    assert_eq!(c.uniform_buffers_len(), 0);
+    let frame1 = Arc::new(VideoFrame { width: 16, height: 8, data: PixelData::Rgba8(Arc::new(vec![10u8; 16 * 8 * 4])), ..(*yuv_frame(16, 8)).clone() });
+    let frame2 = Arc::new(VideoFrame { width: 16, height: 8, data: PixelData::Rgba8(Arc::new(vec![20u8; 16 * 8 * 4])), ..(*yuv_frame(16, 8)).clone() });
+    let plan = FramePlan::Layers {
+        width: 16,
+        height: 8,
+        layers: vec![
+            PlanLayer { frame: frame1.clone(), matrix: Affine::IDENTITY, opacity: 1.0, blend: Blend::Normal, fx: None, input: None },
+            PlanLayer { frame: frame2.clone(), matrix: Affine::IDENTITY, opacity: 0.5, blend: Blend::Normal, fx: None, input: None },
+        ],
+    };
+    // Frame 1 creates 2 uniform buffers
+    c.composite(&plan);
+    assert_eq!(c.uniform_buffers_len(), 2);
+    // Frame 2 reuses the 2 existing uniform buffers without allocating any new buffer
+    c.composite(&plan);
+    assert_eq!(c.uniform_buffers_len(), 2);
+}
+
 /// The WGSL tetrahedral LUT matches `Lut3d::apply` on the CPU.
 #[test]
 fn gpu_lut_matches_cpu_tetrahedral() {
@@ -464,7 +515,8 @@ fn gpu_draws_yuv_alpha_plane_like_the_cpu() {
         1.0,
         24,
         filmcraft_time::FrameRate::FPS_24,
-    );
+    )
+    .unwrap();
     let background = Arc::new(VideoFrame::rgba8(320, 180, pixels));
     for bits in [8, 10, 12] {
         let mut c = GpuCompositor::new(&dev, &q);
@@ -554,57 +606,246 @@ fn hdr_input_gpu_matches_cpu() {
 }
 
 #[test]
-fn gpu_compositor_sequence_plan_with_adjustment_layer_blurs() {
-    use filmcraft_time::{FrameRate, Tick, TICKS_PER_SECOND};
-    use filmcraft_media::{Generator, MediaSource, SharedSource};
-    use filmcraft_media::generators::GeneratorSource;
-    use filmcraft_render::SourceMap;
+fn gpu_adjustment_step_matches_cpu_between_layers() {
+    use filmcraft_project::ParamValue;
+    use filmcraft_render::gpufx::FxOp;
     let Some((dev, q)) = device() else {
         eprintln!("no GPU adapter; skipping");
         return;
     };
-    let mut c = GpuCompositor::new(&dev, &q);
-    let (w, h) = (320, 180);
-    let mut p = filmcraft_project::Project::new("adj_test");
-    let seq = p.new_sequence("s", filmcraft_project::SequenceSettings { width: w, height: h, frame_rate: FrameRate::FPS_24, ..Default::default() }, 2, 0, None);
-    let mut map = SourceMap::default();
-    let g = GeneratorSource::new(Generator::ColorMatte { color: [1.0, 0.0, 0.0, 1.0] }, w, h, FrameRate::FPS_24, Tick(10 * TICKS_PER_SECOND));
-    let info = g.info().clone();
-    let matte = p.add_item("m", filmcraft_project::Label::Iris, filmcraft_project::ItemKind::Media(filmcraft_project::MediaClip {
-        media: filmcraft_project::MediaRef::Generator(g.generator.clone()),
-        info,
-        interpret: Default::default(),
-        mark_in: None,
-        mark_out: None,
-        markers: Vec::new(),
-        offline: false,
-        proxy: None,
-        identity: None,
-    }), None);
-    map.0.insert(matte, std::sync::Arc::new(g) as SharedSource);
-    let ti1 = p.make_track_item(matte, filmcraft_project::TrackKind::Video, Tick::ZERO, filmcraft_time::TimeRange::new(Tick::ZERO, FrameRate::FPS_24.tick_of(48)), FrameRate::FPS_24).unwrap();
-    p.sequence_mut(seq).unwrap().video_tracks[0].items.push(ti1);
+    let (w, h) = (128usize, 72usize);
+    // a soft picture at 70 % opacity: the canvas under the adjustment layer is partly transparent
+    let below = {
+        let px = (0..w * h)
+            .flat_map(|i| {
+                let (x, y) = ((i % w) as f32 / w as f32, (i / w) as f32 / h as f32);
+                [x, y, 0.5 * (1.0 - x), 1.0]
+            })
+            .collect();
+        PlanLayer::new(Arc::new(VideoFrame::rgba_f32(w as u32, h as u32, px)), Affine::IDENTITY, 0.7, Blend::Normal)
+    };
+    // an opaque blue box above the adjustment layer, which must stay untouched
+    let above = {
+        let px = (0..w * h)
+            .flat_map(|i| {
+                let (x, y) = (i % w, i / w);
+                if (40..70).contains(&x) && (20..40).contains(&y) { [0.0, 0.0, 1.0, 1.0] } else { [0.0; 4] }
+            })
+            .collect();
+        PlanLayer::new(Arc::new(VideoFrame::rgba_f32(w as u32, h as u32, px)), Affine::IDENTITY, 1.0, Blend::Normal)
+    };
+    let effect = |id: &str, params: &[(&str, f64)]| {
+        let mut e = filmcraft_project::find_effect(id).unwrap().instance();
+        for (p, v) in params {
+            e.param_mut(p).unwrap().value = ParamValue::Float(*v);
+        }
+        e
+    };
+    let cx = filmcraft_render::effects::FxCtx {
+        t: filmcraft_time::Tick::ZERO,
+        px_scale: 1.0,
+        seconds: 0.0,
+        timecode: "",
+        clip_name: "",
+        project: None,
+        env: None,
+        frame_rate: 24.0,
+        working: filmcraft_color::WorkingSpace::Rec709,
+    };
+    let chain = [
+        effect("proc_amp", &[("brightness", 20.0)]),
+        effect("gaussian_blur", &[("blurriness", 8.0)]),
+        effect("lumetri", &[("contrast", 20.0), ("exposure", -0.25), ("vignette_amount", -3.0)]),
+    ];
+    let ops: Vec<FxOp> = chain.iter().map(|e| FxOp::eval(e, &cx, w, h).filter(FxOp::gpu_ok).expect("GPU op")).collect();
+    let plan =
+        FramePlan::Composite { width: w, height: h, steps: vec![PlanStep::Layers(vec![below]), PlanStep::Adjust { ops }, PlanStep::Layers(vec![above])] };
+    let reference = execute_cpu(&plan);
+    // with the effect stage the step runs on the GPU; without one (a device that fails its
+    // validation) the frame is composited on the CPU, with the same picture
+    for stage in [true, false] {
+        let mut c = GpuCompositor::new(&dev, &q);
+        if stage && c.fx.is_none() {
+            eprintln!("no effect stage on this device; skipping its half");
+            continue;
+        }
+        if !stage {
+            c.fx = None;
+        }
+        // the Program monitor's path (sRGB over black)
+        c.composite_prepared(&plan, Some(&prepare(&plan)));
+        if stage {
+            // the next frame reuses the step's working textures instead of making them again
+            let created = c.fx.as_ref().map(fx::FxStage::created);
+            c.composite_prepared(&plan, Some(&prepare(&plan)));
+            assert_eq!(c.fx.as_ref().map(fx::FxStage::created), created, "the second frame made new working textures");
+        }
+        let (_, _, gpu) = c.read_output().expect("readback");
+        let mut diffs: Vec<u32> = reference
+            .over_black_rgba8()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(gpu.as_chunks::<4>().0)
+            .map(|(a, b)| (0..3).map(|k| a[k].abs_diff(b[k]) as u32).max().unwrap())
+            .collect();
+        diffs.sort_unstable();
+        let p99 = diffs[diffs.len() * 99 / 100];
+        let mean = diffs.iter().sum::<u32>() as f64 / diffs.len() as f64;
+        eprintln!("adjustment step, stage {stage}: p99 {p99}, mean {mean:.3}");
+        assert!(p99 <= 6 && mean < 1.5, "adjustment step, stage {stage}: p99 {p99}, mean {mean}");
+        // the export's path (linear premultiplied f32, no resolve)
+        let (ew, eh, px) = c.render_export_prepared(&plan, Some(&prepare(&plan))).expect("export render");
+        assert_eq!((ew as usize, eh as usize), (w, h));
+        let worst = px.iter().zip(&reference.px).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        eprintln!("adjustment step, stage {stage}, export: max |GPU - CPU| {worst}");
+        assert!(worst < 0.02, "stage {stage}: export render of the adjustment step differs by {worst}");
+        let i = (30 * w + 55) * 4;
+        assert_eq!(px.get(i..i + 4), Some(&[0.0, 0.0, 1.0, 1.0][..]), "the layer above the adjustment layer is untouched");
+        let want = if stage { (3, 0) } else { (0, 2) };
+        assert_eq!((c.gpu_adjustments, c.cpu_adjustments), want, "stage {stage}");
+    }
+}
 
-    let plan0 = filmcraft_render::plan::plan_frame(&p, seq, Tick::ZERO, filmcraft_render::RenderOptions::default(), &map);
-    let prep0 = prepare(&plan0);
-    c.composite_prepared(&plan0, Some(&prep0));
-    let (_, _, out0) = c.read_output().expect("readback");
+/// Regression for #3418: several threads creating instances and devices, using them and dropping
+/// them at once deadlocked inside the NVIDIA driver (Vulkan loader critical section in
+/// `vkDestroyDevice` against other devices' `create_texture`/`submit`, plus WGL threads started by
+/// GL-enabled instances). Each thread makes its own instance and device, as concurrent windows and exports do.
+#[test]
+fn many_threads_create_use_and_drop_devices_at_once() {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+    const THREADS: usize = 16;
+    const ROUNDS: usize = 4;
+    let (tx, rx) = mpsc::channel();
+    for _ in 0..THREADS {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let mut used = 0usize;
+            for _ in 0..ROUNDS {
+                let Some((device, queue)) = device() else { break };
+                let tex = device.create_texture(&wgpu::TextureDescriptor {
+                    label: None,
+                    size: wgpu::Extent3d { width: 64, height: 64, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                });
+                let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+                let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+                drop(enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::RED), store: wgpu::StoreOp::Store },
+                    })],
+                    ..Default::default()
+                }));
+                queue.submit([enc.finish()]);
+                let _ = device.poll(wgpu::PollType::wait_indefinitely());
+                used += 1;
+                drop((view, tex, queue, device));
+            }
+            let _ = tx.send(used);
+        });
+    }
+    drop(tx);
+    let deadline = Instant::now() + Duration::from_secs(120);
+    for i in 0..THREADS {
+        let left = deadline.saturating_duration_since(Instant::now());
+        assert!(rx.recv_timeout(left).is_ok(), "only {i} of {THREADS} threads finished within 120 s: device setup deadlocked");
+    }
 
-    let adj = p.add_item("adj", filmcraft_project::Label::Lavender, filmcraft_project::ItemKind::AdjustmentLayer { width: w, height: h, rate: FrameRate::FPS_24, duration: FrameRate::FPS_24.tick_of(48) }, None);
-    let mut ti2 = p.make_track_item(adj, filmcraft_project::TrackKind::Video, Tick::ZERO, filmcraft_time::TimeRange::new(Tick::ZERO, FrameRate::FPS_24.tick_of(48)), FrameRate::FPS_24).unwrap();
-    let mut e = filmcraft_project::find_effect("gaussian_blur").unwrap().instance();
-    e.params.get_mut("blurriness").unwrap().value = filmcraft_project::ParamValue::Float(1830.2);
-    e.params.get_mut("repeat_edge").unwrap().value = filmcraft_project::ParamValue::Bool(false);
-    let pos = ti2.effects.iter().position(|e| e.def().is_some_and(|d| d.intrinsic)).unwrap_or(ti2.effects.len());
-    ti2.effects.insert(pos, e);
-    p.sequence_mut(seq).unwrap().video_tracks[1].items.push(ti2);
+}
 
-    let plan1 = filmcraft_render::plan::plan_frame(&p, seq, Tick::ZERO, filmcraft_render::RenderOptions::default(), &map);
-    let prep1 = prepare(&plan1);
-    c.composite_prepared(&plan1, Some(&prep1));
-    let (_, _, out1) = c.read_output().expect("readback");
+/// Require an adapter for the explicit lifecycle regressions; absence is not a passing skip.
+fn retained_readback_compositor() -> GpuCompositor {
+    let (dev, q) = device().expect("GPU adapter required for explicit readback regression");
+    let mut compositor = GpuCompositor::new(&dev, &q);
+    compositor.accum_readback_buf = Some((
+        dev.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readback-cleanup-regression"),
+            size: 256,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        }),
+        256,
+    ));
+    compositor
+}
 
-    eprintln!("out0 at (100, 100): {:?}", &out0[100 * 320 * 4 + 100 * 4 .. 100 * 320 * 4 + 100 * 4 + 4]);
-    eprintln!("out1 at (100, 100): {:?}", &out1[100 * 320 * 4 + 100 * 4 .. 100 * 320 * 4 + 100 * 4 + 4]);
-    assert_ne!(out0, out1);
+/// Failed buffers must leave the cache; a new copy must recreate usable staging storage.
+fn assert_readback_retired_and_rendering_recovers(compositor: &mut GpuCompositor) {
+    assert!(compositor.accum_readback_buf.is_none(), "failed staging buffer remained cached");
+    let plan = FramePlan::Layers { width: 1, height: 1, layers: vec![] };
+    let (width, height, rgba) = compositor.render_export_prepared(&plan, None).expect("readback recovers with new staging storage");
+    assert_eq!((width, height, rgba.len()), (1, 1, 4));
+    assert!(compositor.accum_readback_buf.is_some(), "successful readback must retain its cache");
+    let again = compositor.read_accumulator().expect("successful staging storage remains reusable");
+    assert_eq!(again, (width, height, rgba));
+}
+
+/// A wait failure after a real completed map must not retain the failed staging storage.
+#[test]
+#[ignore = "requires a working GPU adapter for staging-buffer lifecycle verification"]
+fn accumulator_readback_retires_after_failed_wait() {
+    let mut compositor = retained_readback_compositor();
+    assert!(
+        compositor
+            .map_accumulator_with_wait((1, 1, 256), |device, rx| {
+                assert!(wait_mapped(device, rx).is_some());
+                None
+            })
+            .is_none()
+    );
+    assert_readback_retired_and_rendering_recovers(&mut compositor);
+}
+
+/// Reject hostile conversion dimensions without retaining a successfully mapped buffer.
+#[test]
+#[ignore = "requires a working GPU adapter for staging-buffer lifecycle verification"]
+fn accumulator_readback_retires_after_rejected_conversion() {
+    let mut compositor = retained_readback_compositor();
+    assert!(compositor.map_accumulator((u32::MAX, u32::MAX, 256)).is_none());
+    assert_readback_retired_and_rendering_recovers(&mut compositor);
+}
+
+/// Retire a still-pending map before the next copy/readback attempt uses the cache.
+#[test]
+#[ignore = "requires a working GPU adapter for staging-buffer lifecycle verification"]
+fn accumulator_readback_retires_pending_map_after_failed_wait() {
+    let mut compositor = retained_readback_compositor();
+    assert!(compositor.map_accumulator_with_wait((1, 1, 256), |_, _| None).is_none());
+    assert_readback_retired_and_rendering_recovers(&mut compositor);
+}
+
+/// Real callback rejection may already leave native storage unmapped; do not unmap it twice.
+#[test]
+#[ignore = "requires a working GPU adapter for staging-buffer lifecycle verification"]
+fn accumulator_readback_retires_rejected_native_map() {
+    let mut compositor = retained_readback_compositor();
+    let errors = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let observed = errors.clone();
+    compositor.device.on_uncaptured_error(Arc::new(move |error| {
+        observed.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(format!("{error}"));
+    }));
+    compositor.accum_readback_buf.as_ref().unwrap().0.destroy();
+    assert!(
+        compositor
+            .map_accumulator_with_wait((1, 1, 256), |device, rx| {
+                device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(MAP_TIMEOUT) }).unwrap();
+                assert!(matches!(rx.recv_timeout(MAP_TIMEOUT), Ok(Err(_))), "expected an actual rejected map callback");
+                None
+            })
+            .is_none()
+    );
+    assert_readback_retired_and_rendering_recovers(&mut compositor);
+    assert!(
+        !errors.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().any(|error| error.contains("Buffer is not mapped")),
+        "cleanup attempted to unmap an already rejected mapping"
+    );
 }

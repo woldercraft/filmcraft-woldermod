@@ -13,6 +13,7 @@
 //! radius costs O(1) per pixel like on the CPU (radii are capped by `gaussian_boxes`).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use filmcraft_render::gpufx::FxOp;
 use filmcraft_render::plan::LayerFx;
@@ -52,6 +53,14 @@ const OP_MIRROR: u32 = 28;
 const OP_OFFSET: u32 = 29;
 const OP_VIDEO_LIMITER: u32 = 30;
 const OP_LUMETRI: u32 = 31;
+const OP_BOKEH_DOWN: u32 = 32;
+const OP_BOKEH_BOOST: u32 = 33;
+const OP_BOKEH: u32 = 34;
+const OP_BOKEH_UP: u32 = 35;
+const OP_THREE_WAY: u32 = 36;
+const OP_COLOR_WHEELS: u32 = 37;
+const OP_LUMETRI_LOOK: u32 = 38;
+const OP_LUT_3D: u32 = 39;
 
 type Target = (wgpu::Texture, wgpu::TextureView);
 
@@ -63,6 +72,11 @@ pub(crate) struct FxStage {
     source: wgpu::RenderPipeline,
     pool: HashMap<(u32, u32), Vec<Target>>,
     used: HashSet<(u32, u32)>,
+    lut_cache: HashMap<usize, (Arc<filmcraft_color::Lut3d>, wgpu::Texture, wgpu::TextureView)>,
+    /// Open [`begin_frame`](Self::begin_frame)s.
+    frames: u32,
+    /// Working textures created so far (a steady stream of frames creates none).
+    created: u64,
 }
 
 /// One compute pass of a job.
@@ -93,6 +107,10 @@ struct Step {
     combine: bool,
     /// A blur pass of Unsharp Mask (the original stays untouched until the combine).
     unsharp_blur: bool,
+    /// Bokeh Blur's gather: its kernel (`filmcraft_render::vfx::bokeh_kernel`), read as the aux
+    /// texture.
+    kernel: Vec<(i32, i32, f32)>,
+    lut: Option<Arc<filmcraft_color::Lut3d>>,
 }
 
 fn step(code: u32, i1: [u32; 4], p: &[f32]) -> Step {
@@ -100,7 +118,39 @@ fn step(code: u32, i1: [u32; 4], p: &[f32]) -> Step {
     for (d, s) in q.iter_mut().zip(p) {
         *d = *s;
     }
-    Step { run: false, code, i1, p: q, combine: false, unsharp_blur: false }
+    Step { run: false, code, i1, p: q, combine: false, unsharp_blur: false, kernel: Vec::new(), lut: None }
+}
+
+/// Texels a row of a kernel texture holds.
+const KERNEL_ROW: usize = 64;
+
+/// Bokeh Blur's kernel as a texture: entry `k` at (`k` % [`KERNEL_ROW`], `k` / [`KERNEL_ROW`]),
+/// (dx, dy, weight, 0). At most 2500 entries: 40 rows.
+fn kernel_texture(device: &wgpu::Device, queue: &wgpu::Queue, kernel: &[(i32, i32, f32)]) -> wgpu::TextureView {
+    let rows = kernel.len().div_ceil(KERNEL_ROW).max(1);
+    let mut texels = vec![0f32; rows * KERNEL_ROW * 4];
+    for (t, &(dx, dy, wt)) in texels.as_chunks_mut::<4>().0.iter_mut().zip(kernel) {
+        *t = [dx as f32, dy as f32, wt, 0.0];
+    }
+    let size = wgpu::Extent3d { width: KERNEL_ROW as u32, height: rows as u32, depth_or_array_layers: 1 };
+    let t = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("filmcraft-fx-kernel"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let bytes: Vec<u8> = texels.iter().flat_map(|v| v.to_le_bytes()).collect();
+    queue.write_texture(
+        t.as_image_copy(),
+        &bytes,
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some((KERNEL_ROW * 16) as u32), rows_per_image: Some(rows as u32) },
+        size,
+    );
+    t.create_view(&Default::default())
 }
 
 /// Box passes along x (vertical = false) or y for the radii (radius 0 is a no-op on the CPU).
@@ -112,8 +162,9 @@ fn boxes(radii: &[u32], vertical: bool, repeat: bool, out: &mut Vec<Step>) {
     }
 }
 
-/// The passes of an op (empty: no-op). Unsharp's blur passes come first, then the combine.
-fn steps(op: &FxOp) -> Vec<Step> {
+/// The passes of an op on a `w`×`h` working image (empty: no-op). Unsharp's blur passes come
+/// first, then the combine.
+fn steps(op: &FxOp, w: u32, h: u32) -> Vec<Step> {
     let mut out = Vec::new();
     match op {
         FxOp::BrightnessContrast { br, co } => out.push(step(OP_BRIGHTNESS_CONTRAST, [0; 4], &[*br, *co])),
@@ -125,6 +176,11 @@ fn steps(op: &FxOp) -> Vec<Step> {
         FxOp::ColorBalance { sh, md, hi, preserve } => {
             out.push(step(OP_COLOR_BALANCE, [*preserve as u32, 0, 0, 0], &[sh[0], sh[1], sh[2], 0.0, md[0], md[1], md[2], 0.0, hi[0], hi[1], hi[2]]))
         }
+        FxOp::ThreeWay { sh, md, hi, range, sat } => out.push(step(
+            OP_THREE_WAY,
+            [op.is_identity_three_way() as u32, 0, 0, 0],
+            &[sh[0], sh[1], sh[2], sh[3], md[0], md[1], md[2], md[3], hi[0], hi[1], hi[2], hi[3], range[0], range[1], range[2], range[3], *sat],
+        )),
         FxOp::LeaveColor { amount, key_hue, tol, soft } => out.push(step(OP_LEAVE_COLOR, [0; 4], &[*amount, *key_hue, *tol, *soft])),
         FxOp::ChangeToColor { from_hue, to_hue, tol, soft } => out.push(step(OP_CHANGE_TO_COLOR, [0; 4], &[*from_hue, *to_hue, *tol, *soft])),
         FxOp::ColorPass { key, sim, reverse } => out.push(step(OP_COLOR_PASS, [*reverse as u32, 0, 0, 0], &[key[0], key[1], key[2], *sim])),
@@ -141,6 +197,32 @@ fn steps(op: &FxOp) -> Vec<Step> {
         FxOp::DirectionalBlur { dx, dy, steps } => {
             if *steps >= 2 {
                 out.push(step(OP_DIRECTIONAL, [*steps, 0, 0, 0], &[*dx, *dy]));
+            }
+        }
+        FxOp::Bokeh { levels, boost, threshold, sides, rot, rr, rings } => {
+            if *rings > 0 {
+                // `vfx::bokeh` on the top-left part of the working textures: each halving writes
+                // the half-size image there, the boost and the gather work in place, and the
+                // last pass scales it back up to the whole image.
+                let (mut ww, mut wh) = (w, h);
+                for _ in 0..*levels {
+                    out.push(step(OP_BOKEH_DOWN, [ww, wh, 0, 0], &[]));
+                    (ww, wh) = ((ww / 2).max(1), (wh / 2).max(1));
+                }
+                if *boost > 0.0 {
+                    out.push(step(OP_BOKEH_BOOST, [ww, wh, 0, 0], &[*boost, *threshold]));
+                }
+                let kernel = filmcraft_render::vfx::bokeh_kernel(*sides, *rot, *rr, *rings);
+                let mut gather = step(OP_BOKEH, [ww, wh, kernel.len() as u32, 0], &[]);
+                gather.kernel = kernel;
+                out.push(gather);
+                if *levels > 0 {
+                    // `Image::transformed` by scale(w / ww, h / wh): its inverse, in f64 as there
+                    let m = filmcraft_geom::Affine::scale(w as f64 / ww as f64, h as f64 / wh as f64);
+                    if let Some(inv) = m.inverse() {
+                        out.push(step(OP_BOKEH_UP, [ww, wh, 0, 0], &[inv.a as f32, inv.d as f32, inv.e as f32, inv.f as f32]));
+                    }
+                }
             }
         }
         FxOp::Unsharp { rx, ry, amount, threshold } => {
@@ -187,6 +269,8 @@ fn steps(op: &FxOp) -> Vec<Step> {
             out.push(step(OP_VIDEO_LIMITER, [*axis, *warn as u32, 0, 0], &[*max, *comp, warning_color[0], warning_color[1], warning_color[2]]));
         }
         FxOp::Lumetri {
+            input_lut,
+            look_lut,
             gains,
             exposure,
             contrast,
@@ -206,8 +290,30 @@ fn steps(op: &FxOp) -> Vec<Step> {
             vround,
             vfeather,
             aspect,
+            look,
+            look_k,
+            sharpen,
+            sharpen_rx,
+            sharpen_ry,
+            wheels_on,
+            ws,
+            wm,
+            wh_rgb,
+            ls,
+            lm,
+            lh,
             ..
         } => {
+            if let Some(lut) = input_lut {
+                let mut s = step(
+                    OP_LUT_3D,
+                    [lut.size as u32, 0, 0, 0],
+                    &[lut.domain_min[0], lut.domain_min[1], lut.domain_min[2], 1.0, lut.domain_max[0], lut.domain_max[1], lut.domain_max[2], 0.0],
+                );
+                s.lut = Some(lut.clone());
+                out.push(s);
+            }
+
             let ge = [gains[0] * exposure, gains[1] * exposure, gains[2] * exposure];
             let b0 = -bl * 0.15;
             let w0 = 1.0 - wh * 0.15;
@@ -244,6 +350,49 @@ fn steps(op: &FxOp) -> Vec<Step> {
                 0.0,
             ];
             out.push(step(OP_LUMETRI, [*creative_on as u32, *vignette_on as u32, 0, 0], &p));
+
+            if let Some(lut) = look_lut {
+                if look_k.abs() > 1e-5 {
+                    let mut s = step(
+                        OP_LUT_3D,
+                        [lut.size as u32, 0, 0, 0],
+                        &[lut.domain_min[0], lut.domain_min[1], lut.domain_min[2], *look_k, lut.domain_max[0], lut.domain_max[1], lut.domain_max[2], 0.0],
+                    );
+                    s.lut = Some(lut.clone());
+                    out.push(s);
+                }
+            } else if *look > 0 && *look <= 8 && look_k.abs() > 1e-5 {
+                out.push(step(OP_LUMETRI_LOOK, [*look, 0, 0, 0], &[*look_k]));
+            }
+
+            let wheels_active = *wheels_on
+                && (ws.iter().chain(wm).chain(wh_rgb).any(|v| v.abs() > 1e-5) || (ls.abs() + lm.abs() + lh.abs() > 1e-5));
+            if wheels_active {
+                let lift_k = [ws[0] * 0.3 + ls * 0.3, ws[1] * 0.3 + ls * 0.3, ws[2] * 0.3 + ls * 0.3];
+                let gamma_k = [wm[0] * 0.3 + lm * 0.3, wm[1] * 0.3 + lm * 0.3, wm[2] * 0.3 + lm * 0.3];
+                let gain_k = [wh_rgb[0] * 0.5 + lh * 0.5, wh_rgb[1] * 0.5 + lh * 0.5, wh_rgb[2] * 0.5 + lh * 0.5];
+                let wheels_p = [
+                    lift_k[0], lift_k[1], lift_k[2], 0.0,
+                    gamma_k[0], gamma_k[1], gamma_k[2], 0.0,
+                    gain_k[0], gain_k[1], gain_k[2], 0.0,
+                    0.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0,
+                ];
+                out.push(step(OP_COLOR_WHEELS, [0; 4], &wheels_p));
+            }
+
+            if sharpen.abs() > 1e-3 && !sharpen_rx.is_empty() {
+                let start = out.len();
+                boxes(sharpen_rx, false, true, &mut out);
+                boxes(sharpen_ry, true, true, &mut out);
+                for s in &mut out[start..] {
+                    s.unsharp_blur = true;
+                }
+                let mut s = step(OP_UNSHARP, [0; 4], &[sharpen.max(-1.0), 0.0]);
+                s.combine = true;
+                out.push(s);
+            }
         }
     }
     out
@@ -331,18 +480,100 @@ impl FxStage {
             multiview_mask: None,
             cache: None,
         });
-        Self { px: compute("fx_px"), run: compute("fx_run"), bgl, source, pool: HashMap::new(), used: HashSet::new() }
+        Self {
+            px: compute("fx_px"),
+            run: compute("fx_run"),
+            bgl,
+            source,
+            pool: HashMap::new(),
+            used: HashSet::new(),
+            lut_cache: HashMap::new(),
+            frames: 0,
+            created: 0,
+        }
+    }
+
+    /// Clear pooled textures and cached LUT textures.
+    pub(crate) fn trim_uploads(&mut self) {
+        self.lut_cache.clear();
+        self.pool.clear();
+    }
+
+    fn lut_texture(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, lut: &Arc<filmcraft_color::Lut3d>) -> wgpu::TextureView {
+        let key = Arc::as_ptr(lut) as usize;
+        if let Some((_, _, view)) = self.lut_cache.get(&key) {
+            return view.clone();
+        }
+        if self.lut_cache.len() >= 32 {
+            self.lut_cache.clear();
+        }
+        let size = lut.size as u32;
+        let width = size * size;
+        let height = size;
+        let row_bytes = width * 16;
+        let aligned_row_bytes = row_bytes.div_ceil(256) * 256;
+        let mut texels = vec![0u8; (aligned_row_bytes * height) as usize];
+        for b in 0..size as usize {
+            let row_offset = b * (aligned_row_bytes as usize);
+            for g in 0..size as usize {
+                for r in 0..size as usize {
+                    let lut_idx = r + g * (size as usize) + b * (size as usize) * (size as usize);
+                    let c = lut.data.get(lut_idx).copied().unwrap_or([0.0, 0.0, 0.0]);
+                    let x = (r + g * (size as usize)) * 16;
+                    let dst_slice = &mut texels[row_offset + x..row_offset + x + 16];
+                    dst_slice[0..4].copy_from_slice(&c[0].to_le_bytes());
+                    dst_slice[4..8].copy_from_slice(&c[1].to_le_bytes());
+                    dst_slice[8..12].copy_from_slice(&c[2].to_le_bytes());
+                    dst_slice[12..16].copy_from_slice(&1.0f32.to_le_bytes());
+                }
+            }
+        }
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("filmcraft-fx-lut3d"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            texture.as_image_copy(),
+            &texels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(aligned_row_bytes),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        let view = texture.create_view(&Default::default());
+        self.lut_cache.insert(key, (lut.clone(), texture, view.clone()));
+        view
     }
 
     /// Start a frame: pooled textures of sizes no layer uses by [`end_frame`](Self::end_frame)
-    /// are released then.
+    /// are released then. Frames nest (a composite of several steps is one frame around the
+    /// layers of each step): the pool is trimmed when the outermost one ends.
     pub(crate) fn begin_frame(&mut self) {
-        self.used.clear();
+        if self.frames == 0 {
+            self.used.clear();
+        }
+        self.frames = self.frames.saturating_add(1);
     }
 
     pub(crate) fn end_frame(&mut self) {
-        let used = &self.used;
-        self.pool.retain(|k, _| used.contains(k));
+        self.frames = self.frames.saturating_sub(1);
+        if self.frames == 0 {
+            let used = &self.used;
+            self.pool.retain(|k, _| used.contains(k));
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn created(&self) -> u64 {
+        self.created
     }
 
     /// No working textures held.
@@ -370,6 +601,7 @@ impl FxStage {
             });
             let view = t.create_view(&Default::default());
             v.push((t, view));
+            self.created = self.created.saturating_add(1);
         }
         v.iter().take(n).cloned().collect()
     }
@@ -391,7 +623,7 @@ impl FxStage {
         if w > max || h > max {
             return None;
         }
-        let all: Vec<Step> = fx.ops.iter().flat_map(steps).collect();
+        let all: Vec<Step> = fx.ops.iter().flat_map(|op| steps(op, w, h)).collect();
         let n = if all.iter().any(|s| s.combine) { 3 } else { 2 };
         let targets = self.targets(device, (w, h), n);
         let views: Vec<wgpu::TextureView> = targets.iter().map(|t| t.1.clone()).collect();
@@ -406,8 +638,12 @@ impl FxStage {
             }
             let keep = if s.unsharp_blur || s.combine { orig } else { None };
             let dst = (0..n).find(|k| *k != cur && Some(*k) != keep)?;
-            let aux = match (s.combine, orig) {
-                (true, Some(o)) => views.get(o)?,
+            let kernel = (!s.kernel.is_empty()).then(|| kernel_texture(device, queue, &s.kernel));
+            let lut_tex = s.lut.as_ref().map(|l| self.lut_texture(device, queue, l));
+            let aux = match (s.combine, orig, &kernel, &lut_tex) {
+                (true, Some(o), _, _) => views.get(o)?,
+                (_, _, Some(k), _) => k,
+                (_, _, _, Some(lt)) => lt,
                 _ => dummy,
             };
             let mut bytes = Vec::with_capacity(128);

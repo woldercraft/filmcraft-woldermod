@@ -8,6 +8,7 @@
 //! decode, and a hardware decoder that fails mid-stream switches to
 //! [`crate::software_video_decoder`], so registering one never makes a file undecodable.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use filmcraft_isobmff::{CodecConfig, SampleEntry};
@@ -175,54 +176,46 @@ impl StreamInfo {
     /// with (parameter sets, a sequence header, a key frame of another format).
     pub fn parameters_changed(&self, sample: &[u8]) -> bool {
         match self {
-            Self::Nal(i) => i.nals(sample).into_iter().any(|n| {
-                let Some(&h) = n.first() else { return false };
-                if !i.is_parameter_set(i.nal_type(h)) {
-                    return false;
-                }
-                if i.parameter_sets.iter().any(|p| without_trailing_zeros(p) == without_trailing_zeros(n)) {
-                    return false;
-                }
-                // When byte 0 matches, check if the picture format actually changed (encoders like
-                // x264/FFmpeg write provisional VUI timing info in avcC that differs from in-band SPS):
-                if i.codec == NalCodec::H264 {
-                    if i.nal_type(h) == 7 && i.parameter_sets.iter().any(|p| p.first() == Some(&h)) {
-                        if let Ok(sps) = filmcraft_h264::params::Sps::parse(&filmcraft_bitstream::unescape_rbsp(n.get(1..).unwrap_or_default())) {
-                            if (sps.width(), sps.height()) == i.coded
-                                && sps.crop_rect() == i.crop
-                                && sps.chroma_format_idc == i.chroma_format_idc
-                                && sps.bit_depth_luma == i.bit_depth_luma
-                                && sps.bit_depth_chroma == i.bit_depth_chroma
-                                && !sps.frame_mbs_only == i.interlaced
-                                && sps.profile_idc == i.profile_idc
-                            {
-                                return false;
-                            }
-                        }
-                    } else if i.nal_type(h) == 8 {
-                        // PPS never changes the hardware decoder picture format / session parameters
+            Self::Nal(i) => {
+                let configured: HashSet<&[u8]> = i.parameter_sets.iter().map(|p| without_trailing_zeros(p)).collect();
+                let mut checked = HashSet::new();
+                i.nals(sample).into_iter().any(|n| {
+                    let n = without_trailing_zeros(n);
+                    let Some(&h) = n.first() else { return false };
+                    if !i.is_parameter_set(i.nal_type(h)) || !checked.insert(n) || configured.contains(n) {
                         return false;
                     }
-                } else if i.codec == NalCodec::Hevc {
-                    if i.nal_type(h) == 33 && i.parameter_sets.iter().any(|p| p.first() == Some(&h)) {
-                        if let Ok(sps) = filmcraft_hevc::params::Sps::parse(&filmcraft_bitstream::unescape_rbsp(n.get(2..).unwrap_or_default())) {
-                            if (sps.width, sps.height) == i.coded
-                                && sps.crop_rect() == i.crop
-                                && sps.chroma_format_idc == i.chroma_format_idc
-                                && sps.bit_depth_luma == i.bit_depth_luma
-                                && sps.bit_depth_chroma == i.bit_depth_chroma
-                                && sps.ptl.profile_idc == i.profile_idc
-                            {
-                                return false;
-                            }
-                        }
-                    } else if matches!(i.nal_type(h), 32 | 34) {
-                        // VPS and PPS never change the picture format / session parameters
+                    // When byte 0 matches, check if the picture format actually changed (encoders like
+                    // x264/FFmpeg write provisional VUI timing info in avcC that differs from in-band SPS):
+                    if i.codec == NalCodec::H264
+                        && i.nal_type(h) == 7
+                        && i.parameter_sets.iter().any(|p| p.first() == Some(&h))
+                        && let Ok(sps) = filmcraft_h264::params::Sps::parse(&filmcraft_bitstream::unescape_rbsp(n.get(1..).unwrap_or_default()))
+                        && (sps.width(), sps.height()) == i.coded
+                        && sps.crop_rect() == i.crop
+                        && sps.chroma_format_idc == i.chroma_format_idc
+                        && sps.bit_depth_luma == i.bit_depth_luma
+                        && sps.bit_depth_chroma == i.bit_depth_chroma
+                        && !sps.frame_mbs_only == i.interlaced
+                        && sps.profile_idc == i.profile_idc
+                    {
+                        return false;
+                    } else if i.codec == NalCodec::Hevc
+                        && i.nal_type(h) == 33
+                        && i.parameter_sets.iter().any(|p| p.first() == Some(&h))
+                        && let Ok(sps) = filmcraft_hevc::params::Sps::parse(&filmcraft_bitstream::unescape_rbsp(n.get(2..).unwrap_or_default()))
+                        && (sps.width, sps.height) == i.coded
+                        && sps.crop_rect() == i.crop
+                        && sps.chroma_format_idc == i.chroma_format_idc
+                        && sps.bit_depth_luma == i.bit_depth_luma
+                        && sps.bit_depth_chroma == i.bit_depth_chroma
+                        && sps.ptl.profile_idc == i.profile_idc
+                    {
                         return false;
                     }
-                }
-                true
-            }),
+                    true
+                })
+            }
             Self::Frame(i) => i.parameters_changed(sample),
         }
     }
@@ -499,5 +492,17 @@ mod tests {
         assert!(!info.parameters_changed(&sample(&[&hvcc_pps[..], &[0, 0]].concat())), "nor are several");
         assert!(info.parameters_changed(&sample(&hvcc_pps[..6])), "a missing byte that is not zero is a change");
         assert!(info.parameters_changed(&sample(&[0x44, 0x01, 0xe0, 0xf7, 0xc0, 0x4c, 0x91])), "another PPS is a change");
+    }
+
+    #[test]
+    fn repeated_parameter_sets_are_checked_once_per_distinct_nal() {
+        let pps = vec![0x44, 0x01, 0xe0, 0xf7, 0xc0, 0x4c, 0x90];
+        let info = StreamInfo::Nal(hevc_info(std::iter::repeat_n(pps.clone(), 256).collect()));
+        let mut sample = Vec::new();
+        for _ in 0..256 {
+            sample.extend_from_slice(&(pps.len() as u32).to_be_bytes());
+            sample.extend_from_slice(&pps);
+        }
+        assert!(!info.parameters_changed(&sample));
     }
 }

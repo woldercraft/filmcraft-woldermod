@@ -3,6 +3,7 @@
 //! apply the Export effects (image, name and timecode overlays, video limiter) and convert to the
 //! encoder's input (straight sRGB RGBA8, or encoded R'G'B' floats for HDR).
 
+use std::io::Cursor;
 use std::sync::Arc;
 
 use filmcraft_geom::Vec2;
@@ -13,6 +14,17 @@ use rayon::prelude::*;
 
 use crate::settings::{ExportEffects, Placement, Scaling, TextOverlay};
 use crate::{ExportError, ExportSettings, FrameRenderer, GpuRendering, Result, build_frame_renderer, note_gpu_fallback, note_gpu_frame};
+
+/// Image overlays originate outside the project and are expanded to f32 working images. This
+/// admits ordinary 4K artwork while keeping both source decode and resampling bounded.
+const MAX_OVERLAY_PIXELS: usize = 16 << 20;
+
+fn bounded_overlay_dimensions(w: usize, h: usize) -> Result<()> {
+    if w == 0 || h == 0 || w.checked_mul(h).is_none_or(|pixels| pixels > MAX_OVERLAY_PIXELS) {
+        return Err(ExportError::Unsupported("image overlay exceeds the pixel budget".into()));
+    }
+    Ok(())
+}
 
 /// Where the rendered picture lands in the output frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -54,6 +66,10 @@ impl Geometry {
 struct RendererPool {
     /// Initial capacity, also the maximum number of frame tasks admitted at once.
     capacity: usize,
+    /// Whether the pooled renderers accept a pre-planned [`filmcraft_render::plan::FramePlan`].
+    supports_plan: bool,
+    /// What every renderer of the pool runs: a frame is planned for whichever one it gets.
+    caps: filmcraft_render::plan::DeviceCaps,
     renderers: std::sync::Mutex<Vec<Box<dyn FrameRenderer>>>,
     available: std::sync::Condvar,
     /// A renderer panicked: the pool is retired and the rest of the export renders on the CPU.
@@ -63,8 +79,12 @@ struct RendererPool {
 impl RendererPool {
     /// `None` for an empty list (a pool nobody could take from).
     fn new(renderers: Vec<Box<dyn FrameRenderer>>) -> Option<Self> {
-        (!renderers.is_empty()).then(|| Self {
+        let supports_plan = renderers.first().is_some_and(|r| r.supports_plan());
+        let adjust_side = renderers.iter().map(|r| r.caps().adjust_side).min()?;
+        Some(Self {
             capacity: renderers.len(),
+            supports_plan,
+            caps: filmcraft_render::plan::DeviceCaps { adjust_side },
             renderers: std::sync::Mutex::new(renderers),
             available: std::sync::Condvar::new(),
             failed: std::sync::atomic::AtomicBool::new(false),
@@ -109,6 +129,13 @@ impl RendererPool {
         self.available.notify_all();
         res.ok()
     }
+
+    fn trim(&self) {
+        let mut free = self.renderers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for r in free.iter_mut() {
+            r.trim();
+        }
+    }
 }
 
 /// The immutable part of an export: everything needed to produce one output frame.
@@ -136,6 +163,9 @@ pub(crate) struct Pipeline {
     /// Free the pool's float images when the export ends: a standalone export, not one part of a
     /// batch (`ExportSettings::part_of_batch`).
     trim_pool: bool,
+    /// Frames may leave as ready NV12 (`w * h * 3 / 2` bytes) instead of RGBA8: the encoder takes
+    /// it and Color conversion is Auto ([`Pipeline::set_nv12`]).
+    nv12: std::sync::atomic::AtomicBool,
 }
 
 impl Drop for Pipeline {
@@ -144,14 +174,37 @@ impl Drop for Pipeline {
     /// frames, which nothing else asks for, so free them instead of holding up to 320 MiB idle. A
     /// job still rendering at that moment allocates a few images again; the pool is only a cache.
     /// Parts of a larger job (render-preview segments, proxies) keep them for the next part.
+    /// The same goes for the decoded frames and decoders the sources' caches kept (up to 384 MiB
+    /// per source, never trimmed once the export stops asking) and the 8/16-bit plane shelves:
+    /// without this a long-lived process holds gigabytes after every export. Caches in use by
+    /// another thread (a monitor) are left alone.
     fn drop(&mut self) {
         if self.trim_pool {
-            filmcraft_frame::pool::trim_f32();
+            self.trim();
         }
     }
 }
 
 impl Pipeline {
+    /// Free cached GPU compositor uploads/textures, decode caches, and recycled plane buffers
+    /// when the export finishes.
+    pub(crate) fn trim(&self) {
+        if let Some(pool) = &self.renderer {
+            pool.trim();
+        }
+        filmcraft_codecs::release_idle();
+        filmcraft_frame::pool::trim_f32();
+        filmcraft_frame::pool::trim_planes();
+    }
+
+    /// Free completed/stale decoders (idle for >= 5s) and trim recycled float and plane shelves.
+    /// Active clip decoders are preserved to maintain forward linear decoding continuity.
+    pub(crate) fn trim_stale(&self) {
+        filmcraft_codecs::release_stale(std::time::Duration::from_secs(5));
+        filmcraft_frame::pool::trim_f32();
+        filmcraft_frame::pool::trim_planes();
+    }
+
     /// Bound outer frame tasks before spawning them, not inside a Rayon job. A renderer can
     /// invoke nested parallel decoding/conversion; those joins may steal another frame task.
     /// With at most one active batch and no more tasks than the initial renderer capacity,
@@ -159,7 +212,11 @@ impl Pipeline {
     /// Keep the immutable capacity even after a failed renderer retires the pool.
     pub(crate) fn render_batch_limit(&self, requested: i64) -> i64 {
         let requested = requested.max(1);
-        self.renderer.as_ref().map_or(requested, |pool| requested.min(i64::try_from(pool.capacity).unwrap_or(i64::MAX)))
+        self.renderer.as_ref().map_or(requested, |pool| {
+            // Keep the batch bounded to the renderer pool capacity so every parallel frame
+            // task is guaranteed a renderer without condvar starvation or work-stealing deadlocks.
+            requested.min(i64::try_from(pool.capacity).unwrap_or(i64::MAX))
+        })
     }
 
     pub fn new(project: Arc<Project>, seq: ItemId, settings: &ExportSettings, hdr_out: bool) -> Result<Self> {
@@ -190,9 +247,9 @@ impl Pipeline {
         let renderer = if settings.gpu_rendering == GpuRendering::Off {
             None
         } else {
-            // Up to eight GPU renderers in the pool so larger batches stay in flight and saturate
-            // hardware encoding without idling between read-backs.
-            let count = rayon::current_num_threads().clamp(4, 8);
+            // Between 2 and 4 GPU renderers in the pool: saturates the GPU and hardware encoder
+            // without excessive VRAM or staging buffer memory.
+            let count = rayon::current_num_threads().clamp(2, 4);
             let mut list = Vec::with_capacity(count);
             for _ in 0..count {
                 if let Some(r) = build_frame_renderer() {
@@ -209,6 +266,7 @@ impl Pipeline {
             start_tc: q.start_timecode,
             drop_frame: q.settings.drop_frame,
             trim_pool: !settings.part_of_batch,
+            nv12: std::sync::atomic::AtomicBool::new(false),
             project: project.clone(),
             seq,
             rate: r.rate,
@@ -224,17 +282,111 @@ impl Pipeline {
         })
     }
 
-    /// Output frame `f` as straight sRGB RGBA8 at the output size, or for HDR exports the encoded
-    /// R'G'B' floats (3 per pixel).
-    pub fn frame(&self, f: i64, sources: &dyn SourceProvider) -> (Vec<u8>, Vec<f32>) {
+    /// Let eligible frames leave the GPU already converted to NV12 (`on`), for an encoder that
+    /// takes it. Frames the GPU cannot convert still come out as RGBA8; the encoder tells the
+    /// two apart by length.
+    pub(crate) fn set_nv12(&self, on: bool) {
+        self.nv12.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether the export needs no CPU post-processing between the composited linear accumulator
+    /// and the final sRGB over-black RGBA8 output (so the GPU can resolve directly to `Rgba8Unorm`).
+    fn can_direct_rgba8(&self) -> bool {
+        let fx = &self.effects;
+        !self.hdr_out
+            && !self.alpha
+            && self.geom.offset == (0, 0)
+            && self.geom.content.is_none_or(|(cw, ch)| (cw, ch) == (self.w as usize, self.h as usize))
+            && self.overlay.is_none()
+            && !(fx.name_overlay.enabled && !fx.name_overlay.text.trim().is_empty())
+            && !fx.timecode_overlay.enabled
+    }
+
+    /// Plan and decode media for frame `f` when supported by the registered GPU renderer.
+    /// Calling this sequentially before parallel render passes eliminates work-stealing jitter
+    /// and decoder thrashing in GOP caches.
+    pub fn plan_frame(&self, f: i64, sources: &dyn SourceProvider) -> Option<filmcraft_render::plan::FramePlan> {
         let t = self.rate.tick_of(f);
+        let pool = self.renderer.as_ref().filter(|pool| !filmcraft_render::plan::is_cpu_frame(&self.project, self.seq, t, self.opts, pool.caps))?;
+        if pool.supports_plan {
+            Some(filmcraft_render::plan::plan_frame(&self.project, self.seq, t, self.opts, pool.caps, sources))
+        } else {
+            None
+        }
+    }
+
+    /// Render frame `f` using a pre-planned frame (if available) or by planning on demand.
+    pub fn render_plan_or_frame(
+        &self,
+        f: i64,
+        pre_plan: Option<filmcraft_render::plan::FramePlan>,
+        sources: &dyn SourceProvider,
+    ) -> (Vec<u8>, Vec<f32>) {
+        let t = self.rate.tick_of(f);
+        let lim = &self.effects.video_limiter;
         // The registered GPU renderer goes first; `None` (no adapter, a plan the GPU cannot
         // draw, any internal error) falls back to the CPU reference renderer below. A frame the
-        // planner hands back as one CPU image anyway (an adjustment layer, a complex transition,
-        // HDR) does not take a pooled renderer: it would render on the CPU inside the pool, as
-        // many frames at a time as there are renderers instead of one per export thread.
-        let pool = self.renderer.as_ref().filter(|_| !filmcraft_render::plan::is_cpu_frame(&self.project, self.seq, t));
+        // planner hands back as one CPU image anyway (an adjustment layer the GPU can't run, a
+        // complex transition, HDR) does not take a pooled renderer: it would render on the CPU
+        // inside the pool, as many frames at a time as there are renderers instead of one per
+        // export thread.
+        let pool = self.renderer.as_ref().filter(|pool| !filmcraft_render::plan::is_cpu_frame(&self.project, self.seq, t, self.opts, pool.caps));
         let gpu = match pool {
+            Some(pool) if pool.supports_plan => {
+                // Decode and plan the frame BEFORE acquiring a GPU renderer from the pool so
+                // renderers never sit idle while a worker thread waits on media decoding.
+                let plan = pre_plan.unwrap_or_else(|| filmcraft_render::plan::plan_frame(&self.project, self.seq, t, self.opts, pool.caps, sources));
+                match &plan {
+                    filmcraft_render::plan::FramePlan::Image(img) => Some(img.clone()),
+                    filmcraft_render::plan::FramePlan::Composite { .. } => {
+                        let asked = web_time::Instant::now();
+                        pool.with(|r| {
+                            crate::note_lock_wait(asked.elapsed());
+                            r.render_plan(&plan)
+                        })
+                        .flatten()
+                    }
+                    filmcraft_render::plan::FramePlan::Layers { width, height, .. } => {
+                        if self.can_direct_rgba8() && (*width, *height) == (self.w as usize, self.h as usize) {
+                            // GPU colour conversion: only the NV12 picture comes back (the limiter
+                            // works on RGBA, so it keeps the RGBA route)
+                            if self.nv12.load(std::sync::atomic::Ordering::Relaxed) && !lim.enabled {
+                                let asked = web_time::Instant::now();
+                                let nv12 = pool
+                                    .with(|r| {
+                                        crate::note_lock_wait(asked.elapsed());
+                                        r.render_plan_nv12(&plan)
+                                    })
+                                    .flatten();
+                                if let Some((_, _, nv12)) = nv12 {
+                                    note_gpu_frame();
+                                    return (nv12, Vec::new());
+                                }
+                            }
+                            let asked = web_time::Instant::now();
+                            let direct = pool
+                                .with(|r| {
+                                    crate::note_lock_wait(asked.elapsed());
+                                    r.render_plan_rgba8(&plan)
+                                })
+                                .flatten();
+                            if let Some((_, _, mut rgba)) = direct {
+                                note_gpu_frame();
+                                if lim.enabled {
+                                    limit_rgba8(&mut rgba, lim.min_percent, lim.max_percent);
+                                }
+                                return (rgba, Vec::new());
+                            }
+                        }
+                        let asked = web_time::Instant::now();
+                        pool.with(|r| {
+                            crate::note_lock_wait(asked.elapsed());
+                            r.render_plan(&plan)
+                        })
+                        .flatten()
+                    }
+                }
+            }
             Some(pool) => {
                 let asked = web_time::Instant::now();
                 pool.with(|r| {
@@ -281,6 +433,12 @@ impl Pipeline {
             limit_rgba8(&mut rgba, lim.min_percent, lim.max_percent);
         }
         (rgba, Vec::new())
+    }
+
+    /// Output frame `f` as straight sRGB RGBA8 at the output size, or for HDR exports the encoded
+    /// R'G'B' floats (3 per pixel).
+    pub fn frame(&self, f: i64, sources: &dyn SourceProvider) -> (Vec<u8>, Vec<f32>) {
+        self.render_plan_or_frame(f, None, sources)
     }
 
     /// Fit the rendered picture into the output frame.
@@ -392,8 +550,16 @@ fn composite(dst: &mut Image, src: &Image, x: i64, y: i64, opacity: f32) {
 /// Load a PNG / JPEG overlay as premultiplied linear light, `width` pixels wide.
 fn load_overlay(path: &str, width: f32) -> Result<Image> {
     let bytes = std::fs::read(path).map_err(|e| ExportError::Io(format!("image overlay {path}: {e}")))?;
-    let rgba = image::load_from_memory(&bytes).map_err(|e| ExportError::Unsupported(format!("image overlay {path}: {e}")))?.to_rgba8();
+    let mut reader = image::ImageReader::new(Cursor::new(bytes));
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some((MAX_OVERLAY_PIXELS * 4) as u64);
+    reader.limits(limits);
+    let reader = reader.with_guessed_format().map_err(|e| ExportError::Unsupported(format!("image overlay {path}: {e}")))?;
+    let rgba = reader.decode().map_err(|e| ExportError::Unsupported(format!("image overlay {path}: {e}")))?.to_rgba8();
     let (iw, ih) = (rgba.width() as usize, rgba.height() as usize);
+    bounded_overlay_dimensions(iw, ih)?;
     let mut img = Image::new(iw, ih);
     for (o, p) in img.px.as_chunks_mut::<4>().0.iter_mut().zip(rgba.as_raw().as_chunks::<4>().0) {
         let a = p[3] as f32 / 255.0;
@@ -402,17 +568,33 @@ fn load_overlay(path: &str, width: f32) -> Result<Image> {
         }
         o[3] = a;
     }
+    if !width.is_finite() || width <= 0.0 {
+        return Err(ExportError::Unsupported("image overlay width is invalid".into()));
+    }
     let nw = width.round().max(1.0) as usize;
-    let nh = ((ih as f32 * nw as f32 / iw.max(1) as f32).round() as usize).max(1);
+    let nh = ((ih as f64 * nw as f64 / iw.max(1) as f64).round() as usize).max(1);
+    bounded_overlay_dimensions(nw, nh)?;
     Ok(if (nw, nh) == (iw, ih) { img } else { resample(&img, nw, nh) })
 }
 
 /// Separable resample of a premultiplied image with a triangle filter widened by the reduction
 /// factor (area-correct when downscaling, bilinear when enlarging).
 pub(crate) fn resample(src: &Image, nw: usize, nh: usize) -> Image {
+    // Width first holds an `nw` x `src.h` intermediate, height first a `src.w` x `nh` one. Opposing
+    // thin shapes (1 x 16384 to 16384 x 1) make the first 16384 x 16384: when it is large and the
+    // other order is smaller, take that one (the result is the same filter either way).
+    let (wide, tall) = (nw.saturating_mul(src.h), src.w.saturating_mul(nh));
+    if wide > MAX_RESAMPLE_INTERMEDIATE_PIXELS && tall < wide {
+        let tmp = resample_axis(src, nh, false);
+        return resample_axis(&tmp, nw, true);
+    }
     let tmp = resample_axis(src, nw, true);
     resample_axis(&tmp, nh, false)
 }
+
+/// Pixels of intermediate image a resample may use before it tries the other axis order first
+/// (16 Mi pixels, 256 MiB of float RGBA; HD to UHD is 4 Mi).
+const MAX_RESAMPLE_INTERMEDIATE_PIXELS: usize = 16 << 20;
 
 fn weights(n_src: usize, n_dst: usize) -> Vec<(usize, Vec<f32>)> {
     let scale = n_src as f32 / n_dst as f32;
@@ -497,4 +679,37 @@ fn limit_px(c: &mut [f32; 3], lo: f32, hi: f32) {
         c.iter_mut().for_each(|v| *v += d);
     }
     c.iter_mut().for_each(|v| *v = v.clamp(0.0, hi.max(lo)));
+}
+
+#[cfg(test)]
+mod overlay_budget_tests {
+    use super::*;
+
+    #[test]
+    fn overlay_pixel_budget_is_checked_without_overflow() {
+        assert!(bounded_overlay_dimensions(4096, 4096).is_ok());
+        assert!(bounded_overlay_dimensions(4097, 4096).is_err());
+        assert!(bounded_overlay_dimensions(usize::MAX, 2).is_err());
+    }
+
+    #[test]
+    fn either_axis_order_gives_the_same_picture() {
+        let mut src = Image::new(8, 3);
+        for (i, v) in src.px.iter_mut().enumerate() {
+            *v = ((i * 37) % 11) as f32 / 11.0;
+        }
+        let a = resample_axis(&resample_axis(&src, 5, true), 7, false);
+        let b = resample_axis(&resample_axis(&src, 7, false), 5, true);
+        assert!(a.px.iter().zip(&b.px).all(|(x, y)| (x - y).abs() < 1e-5));
+    }
+
+    #[test]
+    fn opposing_thin_shapes_do_not_build_a_huge_intermediate() {
+        // width first would be 6000 x 6000 pixels (576 MiB); height first is 1 x 1
+        let mut src = Image::new(1, 6000);
+        src.px.iter_mut().for_each(|v| *v = 0.5);
+        let out = resample(&src, 6000, 1);
+        assert_eq!((out.w, out.h), (6000, 1));
+        assert!(out.px.iter().all(|v| (v - 0.5).abs() < 1e-4));
+    }
 }

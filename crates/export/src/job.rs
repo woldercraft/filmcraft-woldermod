@@ -60,8 +60,8 @@
 //!   waiting for the render (large: render-bound; near zero: encode-bound).
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use filmcraft_isobmff::{Brand, Mp4Writer, PcmConfig, SampleEntry, TrackConfig, WriteSample, WriterOptions};
 use filmcraft_project::{ItemId, Project};
@@ -72,10 +72,10 @@ use rayon::prelude::*;
 use crate::audio_out::AudioOut;
 use crate::mxf_out::{MxfMux, MxfSetup};
 use crate::pipeline::Pipeline;
-use crate::settings::{AudioCodec, BitrateMode};
+use crate::settings::{AudioCodec, BitrateMode, ColorConversion, RenderBuffer};
 use crate::{
-    AudioEncoder, ColorSignal, EncodedPacket, EncoderFrame, ExportError, ExportSettings, Format, H264Pass, Out, Progress, Report, Result, Stage, VideoEncoder,
-    audio_factories, export_range, frame_span, note_stage, timed, video_factories,
+    AudioEncoder, ColorSignal, EncodedPacket, EncoderFactory, EncoderFrame, ExportError, ExportSettings, Format, H264Pass, Out, PrepareAhead, Progress, Report,
+    Result, Stage, VideoEncoder, audio_factories, export_range, frame_span, note_stage, timed, video_factories,
 };
 
 /// Output frames per interleaved group: the video packets of these frames, then the audio up to
@@ -86,6 +86,38 @@ pub const INTERLEAVE: i64 = 16;
 /// Most bytes of rendered frames an overlapped export keeps in flight (the batch being encoded and
 /// the one being rendered), see [`overlap_batch`].
 pub const IN_FLIGHT_BUDGET: u64 = 1 << 29;
+
+/// Calculate safe in-flight frame budget based on available system memory (Linux `/proc/meminfo`).
+/// Prevents triggering systemd-oomd "Memory shortage avoided" notifications during heavy exports.
+fn safe_in_flight_budget() -> u64 {
+    if cfg!(test) {
+        return IN_FLIGHT_BUDGET;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(content) = std::fs::read_to_string("/proc/meminfo") {
+            let mut mem_available = 0u64;
+            for line in content.lines() {
+                if let Some(rest) = line.strip_prefix("MemAvailable:") {
+                    if let Ok(kb) = rest.trim().trim_end_matches("kB").trim().parse::<u64>() {
+                        mem_available = kb;
+                        break;
+                    }
+                }
+            }
+            if mem_available > 0 {
+                if mem_available < 2_000_000 {
+                    // Under 2 GB available RAM: tight budget (128 MiB)
+                    return 128 << 20;
+                } else if mem_available < 4_000_000 {
+                    // Under 4 GB available RAM: moderate budget (256 MiB)
+                    return 256 << 20;
+                }
+            }
+        }
+    }
+    IN_FLIGHT_BUDGET
+}
 
 /// One rendered picture: straight RGBA8, or for HDR exports the encoded R'G'B' floats.
 type Frame = (Vec<u8>, Vec<f32>);
@@ -113,19 +145,55 @@ struct Ahead {
 /// Render frames `f..end` in parallel. `None` when a source was not ready for one of them (the
 /// pending flag, taken after every frame because it is per thread): the batch is incomplete and
 /// must be rendered again.
-fn render_batch(pipe: &Pipeline, f: i64, end: i64, sources: &dyn SourceProvider) -> Option<Vec<Frame>> {
+/// `prepare` (the encoder's [`VideoEncoder::prepare_ahead`]) then works on each frame, numbered
+/// from `f0` like [`EncoderFrame::index`].
+fn render_batch(pipe: &Pipeline, f: i64, end: i64, sources: &dyn SourceProvider, prepare: Option<&PrepareAhead>, f0: i64) -> Option<Vec<Frame>> {
+    let count = usize::try_from((end - f).max(0)).unwrap_or(0);
+    if count == 0 {
+        return Some(Vec::new());
+    }
     let pending = AtomicBool::new(false);
-    let frames: Vec<Frame> = (f..end)
-        .into_par_iter()
-        .map(|fi| {
-            let frame = pipe.frame(fi, sources);
+
+    // 1. Plan and decode all eligible frames in strict sequential ascending order (0..count).
+    // This eliminates Rayon work-stealing jitter in GopCache, preventing backward seeks and decoder
+    // resets when batches span cuts between clips of the same source file.
+    let mut plans = Vec::with_capacity(count);
+    for i in 0..count {
+        let fi = f + i as i64;
+        let plan = pipe.plan_frame(fi, sources);
+        if filmcraft_media::pending::take() {
+            pending.store(true, Ordering::Relaxed);
+        }
+        plans.push(plan);
+    }
+    if pending.load(Ordering::Relaxed) {
+        return None;
+    }
+
+    // 2. Render all frames in parallel on the GPU / Rayon worker threads.
+    let slots: Vec<Mutex<Option<Frame>>> = (0..count).map(|_| Mutex::new(None)).collect();
+    plans.into_par_iter().enumerate().for_each(|(i, plan)| {
+        if let Some(slot) = slots.get(i) {
+            let fi = f + i as i64;
+            let frame = pipe.render_plan_or_frame(fi, plan, sources);
             if filmcraft_media::pending::take() {
                 pending.store(true, Ordering::Relaxed);
             }
-            frame
-        })
-        .collect();
-    (!pending.load(Ordering::Relaxed)).then_some(frames)
+            if let Some(prepare) = prepare {
+                let index = u64::try_from(fi - f0).unwrap_or(u64::MAX);
+                prepare(&EncoderFrame { width: pipe.w, height: pipe.h, rgba: &frame.0, hdr: pipe.hdr_out.then_some(frame.1.as_slice()), index });
+            }
+            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(frame);
+        }
+    });
+    if pending.load(Ordering::Relaxed) {
+        return None;
+    }
+    let mut frames = Vec::with_capacity(count);
+    for slot in slots {
+        frames.push(slot.into_inner().unwrap_or_else(|e| e.into_inner())?);
+    }
+    Some(frames)
 }
 
 /// What encoding a batch came to.
@@ -205,12 +273,28 @@ pub(crate) fn hdr_output(working_hdr: bool, sdr: bool, format: Format, hdr_avail
 }
 
 fn make_venc(settings: &ExportSettings, w: u32, h: u32, rate: FrameRate) -> Result<Box<dyn VideoEncoder>> {
-    video_factories()
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .iter()
-        .find_map(|fac| fac(settings.video_format(), w, h, rate, settings))
-        .ok_or_else(|| ExportError::Unsupported(format!("{} encoder not available yet", settings.video_format().label())))?
+    pick_encoder(&video_factories().read().unwrap_or_else(|e| e.into_inner()).clone(), settings.video_format(), w, h, rate, settings)
+}
+
+/// Pick the encoder for an export: the first registered factory that takes it.
+///
+/// A factory answers in one of three ways: it takes the export (`Some(Ok(..))`), it is not its
+/// job (`None`), or it is its job and it failed (`Some(Err(..))`). **A failure must not stop the
+/// walk.** For H.264 the software encoder is the documented fallback ("Hardware encoding: Auto …
+/// otherwise the software encoder"), and for H.265 there is no software encoder at all, so the
+/// next factory may be the only one that can take the export. When no factory takes it, the
+/// first failure is what the user is told — the same message as before.
+fn pick_encoder(factories: &[EncoderFactory], format: Format, w: u32, h: u32, rate: FrameRate, settings: &ExportSettings) -> Result<Box<dyn VideoEncoder>> {
+    let mut first_failure: Option<ExportError> = None;
+    for fac in factories {
+        match fac(format, w, h, rate, settings) {
+            Some(Ok(enc)) => return Ok(enc),
+            Some(Err(e)) if first_failure.is_none() => first_failure = Some(e),
+            Some(Err(_)) => {}
+            None => {}
+        }
+    }
+    Err(first_failure.unwrap_or_else(|| ExportError::Unsupported(format!("{} encoder not available yet", format.label()))))
 }
 
 impl Exporter {
@@ -252,6 +336,7 @@ impl Exporter {
             progress.set_status(format!("Exporting {} frames ({})", nframes, settings.format.label()));
         }
         let venc = make_venc(&settings, pipe.w, pipe.h, pipe.rate)?;
+        pipe.set_nv12(settings.color_conversion == ColorConversion::Auto && venc.accepts_nv12());
         let brand = if settings.format.is_mp4_with(settings.multiplexer) { Brand::Mp4 } else { Brand::Mov };
         let audio = if settings.has_audio() { Some(AudioOut::new(project.clone(), seq, &settings, range)?) } else { None };
         let aenc: Option<Box<dyn AudioEncoder>> = match (&audio, settings.audio_codec()) {
@@ -269,9 +354,13 @@ impl Exporter {
             f0,
             f1,
             next: f0,
-            batch: rayon::current_num_threads().clamp(2, 16) as i64,
+            batch: match settings.render_buffer {
+                RenderBuffer::Auto => (rayon::current_num_threads() * 2).clamp(16, 32) as i64,
+                RenderBuffer::Low => rayon::current_num_threads().clamp(4, 8) as i64,
+                RenderBuffer::Off => 2,
+            },
             overlap: true,
-            budget: IN_FLIGHT_BUDGET,
+            budget: safe_in_flight_budget(),
             ahead: None,
             overlapped_steps: 0,
             brand,
@@ -337,7 +426,7 @@ impl Exporter {
     /// Frames in the next batch, bounded before Rayon can steal nested frame tasks.
     fn batch_len(&self) -> i64 {
         let batch = self.pipe.render_batch_limit(self.batch);
-        if self.overlapping() { overlap_batch(batch, frame_bytes(self.pipe.w, self.pipe.h, self.pipe.hdr_out), self.budget) } else { batch }
+        overlap_batch(batch, frame_bytes(self.pipe.w, self.pipe.h, self.pipe.hdr_out), self.budget)
     }
 
     fn sample_at_frame(&self, f: i64, sr: u32) -> i64 {
@@ -471,6 +560,7 @@ impl Exporter {
             let stats = self.venc.pass_stats().ok_or_else(|| ExportError::Encode("two-pass statistics missing".into()))?;
             self.settings.h264_pass = H264Pass::Second(stats);
             self.venc = make_venc(&self.settings, self.pipe.w, self.pipe.h, self.pipe.rate)?;
+            self.pipe.set_nv12(self.settings.color_conversion == ColorConversion::Auto && self.venc.accepts_nv12());
             self.first_pass = false;
             self.next = self.f0;
             return Ok(Step::Progress);
@@ -499,12 +589,10 @@ impl Exporter {
         let (bytes, extra_files) = match self.mxf.take() {
             Some(m) => m.finish(&self.settings)?,
             None => {
-                let w = self
-                    .mux
-                    .take()
-                    .ok_or_else(|| ExportError::Encode("internal: the container writer was not created".into()))?
-                    .finish()
-                    .map_err(|e| ExportError::Io(e.to_string()))?;
+                let mux = self.mux.take().ok_or_else(|| ExportError::Encode("internal: the container writer was not created".into()))?;
+                // Upload services and progressive players need the MP4 metadata before media.
+                // The muxer relocates data in bounded chunks and adjusts every sample offset.
+                let w = if self.brand == Brand::Mp4 { mux.finish_faststart() } else { mux.finish() }.map_err(|e| ExportError::Io(e.to_string()))?;
                 (w.finish(&self.settings)?, Vec::new())
             }
         };
@@ -527,12 +615,14 @@ impl Exporter {
 
     /// Encode (and mux) the batch starting at `self.next`, rendering the one after it meanwhile.
     fn step_batch(&mut self, sources: &dyn SourceProvider, progress: &Progress) -> Result<Step> {
+        let prepare = self.venc.prepare_ahead();
+        let f0 = self.f0;
         let (f, frames) = match self.ahead.take() {
             Some(a) if a.first == self.next => (a.first, a.frames),
             _ => {
                 let (f, end) = (self.next, self.next.saturating_add(self.batch_len()).min(self.f1));
                 let pipe = &self.pipe;
-                match timed(Stage::Render, || render_batch(pipe, f, end, sources)) {
+                match timed(Stage::Render, || render_batch(pipe, f, end, sources, prepare.as_ref(), f0)) {
                     Some(frames) => (f, frames),
                     None => return Ok(Step::Pending),
                 }
@@ -551,6 +641,10 @@ impl Exporter {
                 Encoded::Done => {
                     progress.done.fetch_add((end - f) as u64, Ordering::Relaxed);
                     self.next = end;
+                    if !self.settings.part_of_batch && (self.next - self.f0) % 120 < (end - f) {
+                        self.pipe.trim_stale();
+                        crate::trim_heap();
+                    }
                     Ok(Step::Progress)
                 }
             };
@@ -560,7 +654,7 @@ impl Exporter {
         let mut encode_done: Option<web_time::Instant> = None;
         let encoded = rayon::in_place_scope(|s| {
             s.spawn(|_| {
-                slot = Some(catch_unwind(AssertUnwindSafe(|| timed(Stage::Render, || render_batch(&pipe, a, b, sources)))));
+                slot = Some(catch_unwind(AssertUnwindSafe(|| timed(Stage::Render, || render_batch(&pipe, a, b, sources, prepare.as_ref(), f0)))));
             });
             let r = self.encode_batch(f, frames, sources);
             encode_done = Some(web_time::Instant::now());
@@ -581,6 +675,12 @@ impl Exporter {
                     // a source was not ready: the next step renders this batch again
                     Some(Ok(None)) | None => {}
                     Some(Err(_)) => return Err(ExportError::Encode("internal error while rendering a frame (the panic was logged by the panic hook)".into())),
+                }
+                // Periodic memory hygiene: evict completed source decoders and free idle frame shelves
+                // so long timeline exports across multiple video files don't accumulate gigabytes of RAM.
+                if !self.settings.part_of_batch && (self.next - self.f0) % 120 < (end - f) {
+                    self.pipe.trim_stale();
+                    crate::trim_heap();
                 }
                 Ok(Step::Progress)
             }
@@ -655,6 +755,78 @@ mod tests {
     use super::*;
 
     const MIB: u64 = 1 << 20;
+
+    /// A factory that answers as it is told, so the walk can be exercised without a driver.
+    fn factory(answer: fn(Format, u32, u32, FrameRate, &ExportSettings) -> Option<Result<Box<dyn VideoEncoder>>>) -> EncoderFactory {
+        answer
+    }
+
+    fn never(_: Format, _: u32, _: u32, _: FrameRate, _: &ExportSettings) -> Option<Result<Box<dyn VideoEncoder>>> {
+        None
+    }
+
+    fn fails(_: Format, _: u32, _: u32, _: FrameRate, _: &ExportSettings) -> Option<Result<Box<dyn VideoEncoder>>> {
+        Some(Err(ExportError::Unsupported("the driver said no".into())))
+    }
+
+    fn fails_other(_: Format, _: u32, _: u32, _: FrameRate, _: &ExportSettings) -> Option<Result<Box<dyn VideoEncoder>>> {
+        Some(Err(ExportError::Unsupported("the other driver said no".into())))
+    }
+
+    fn takes(_: Format, _: u32, _: u32, _: FrameRate, _: &ExportSettings) -> Option<Result<Box<dyn VideoEncoder>>> {
+        Some(Ok(Box::new(Dummy)))
+    }
+
+    /// An encoder that writes nothing; the walk only needs something that can be handed back.
+    struct Dummy;
+
+    impl VideoEncoder for Dummy {
+        fn sample_entry(&self) -> SampleEntry {
+            SampleEntry::avc(filmcraft_isobmff::AvcConfig::default(), 0, 0)
+        }
+        fn timescale(&self) -> u32 {
+            1
+        }
+        fn encode(&mut self, _frame: &EncoderFrame) -> Result<Vec<EncodedPacket>> {
+            Ok(Vec::new())
+        }
+        fn flush(&mut self) -> Result<Vec<EncodedPacket>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// The error of a walk that took no encoder. `Box<dyn VideoEncoder>` is not `Debug`, so this
+    /// is not `expect_err`.
+    fn error_of(r: Result<Box<dyn VideoEncoder>>) -> ExportError {
+        match r {
+            Ok(_) => panic!("the walk took an encoder"),
+            Err(e) => e,
+        }
+    }
+
+    /// A factory that *fails* must not stop the walk: the next factory may be the one that can
+    /// take the export. For H.264 that is FilmCraft's own encoder, and for H.265 it is a second
+    /// hardware encoder, because there is no software H.265 encoder at all.
+    #[test]
+    fn a_failing_factory_does_not_stop_the_walk() {
+        let s = ExportSettings { format: Format::Hevc, ..Default::default() };
+        // the failing factory is asked first, the one that takes it second
+        let taken = pick_encoder(&[factory(fails), factory(takes)], Format::Hevc, 64, 64, FrameRate::FPS_24, &s);
+        assert!(taken.is_ok(), "the second factory takes it");
+    }
+
+    /// Nothing took the export: the first failure is what the user is told, and a factory that
+    /// merely declined is not a failure.
+    #[test]
+    fn the_first_failure_is_reported_when_nothing_takes_the_export() {
+        let s = ExportSettings { format: Format::Hevc, ..Default::default() };
+        let e = error_of(pick_encoder(&[factory(fails), factory(fails_other)], Format::Hevc, 64, 64, FrameRate::FPS_24, &s));
+        assert!(e.to_string().contains("the driver said no"), "{e}");
+        assert!(!e.to_string().contains("the other driver said no"), "the first failure is the one reported: {e}");
+        // a factory that declined is not a failure: the message is the "not available" one
+        let e = error_of(pick_encoder(&[factory(never), factory(never)], Format::Hevc, 64, 64, FrameRate::FPS_24, &s));
+        assert!(e.to_string().contains("encoder not available yet"), "{e}");
+    }
 
     #[test]
     fn frame_bytes_by_format() {

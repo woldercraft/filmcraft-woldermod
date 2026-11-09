@@ -9,12 +9,14 @@
 //! op to the GPU when [`FxOp::gpu_ok`] says the shader covers it (finite numbers, no minifying
 //! resample), otherwise the clip is rendered on the CPU as before.
 
+use std::sync::Arc;
+
 use filmcraft_color::{hsl_to_rgb, linear_to_srgb, luma709, rgb_to_hsl};
 use filmcraft_geom::Affine;
 use filmcraft_project::EffectInstance;
 use rayon::prelude::*;
 
-use crate::effects::{FxCtx, b, choice, color, dec, enc, f, gaussian_boxes, grade_space, on, point, text};
+use crate::effects::{FxCtx, b, choice, color, dec, enc, f, gaussian_boxes, grade_space, lift_scale, on, point, text};
 use crate::image::Image;
 
 /// A bilinear resample of the working image through an affine map (`Image::transformed` at a
@@ -53,6 +55,16 @@ pub enum FxOp {
         md: [f32; 3],
         hi: [f32; 3],
         preserve: bool,
+    },
+    /// Three-Way Color Corrector: per tonal range an encoded-RGB offset (the wheel) and a level
+    /// shift (`[r, g, b, level]`), the range edges `[shadow lo, shadow hi, highlight lo,
+    /// highlight hi]` on encoded luma, and a saturation factor.
+    ThreeWay {
+        sh: [f32; 4],
+        md: [f32; 4],
+        hi: [f32; 4],
+        range: [f32; 4],
+        sat: f32,
     },
     LeaveColor {
         amount: f32,
@@ -105,6 +117,18 @@ pub enum FxOp {
         dx: f32,
         dy: f32,
         steps: u32,
+    },
+    /// Bokeh Blur: `levels` halvings of the working image, highlights boosted (`boost` × a
+    /// smoothstep from `threshold`), an iris-shaped gather of `rings` rings out to radius `rr`
+    /// (`sides` 0 = circle, rotated by `rot` radians), then scaled back up. `rings` 0: no-op.
+    Bokeh {
+        levels: u32,
+        boost: f32,
+        threshold: f32,
+        sides: u32,
+        rot: f32,
+        rr: f32,
+        rings: u32,
     },
     /// Unsharp mask over a repeat-edge Gaussian of the given box radii (per axis).
     Unsharp {
@@ -176,6 +200,8 @@ pub enum FxOp {
         warning_color: [f32; 3],
     },
     Lumetri {
+        input_lut: Option<Arc<filmcraft_color::Lut3d>>,
+        look_lut: Option<Arc<filmcraft_color::Lut3d>>,
         gains: [f32; 3],
         exposure: f32,
         contrast: f32,
@@ -195,6 +221,18 @@ pub enum FxOp {
         vround: f32,
         vfeather: f32,
         aspect: f32,
+        look: u32,
+        look_k: f32,
+        sharpen: f32,
+        sharpen_rx: Vec<u32>,
+        sharpen_ry: Vec<u32>,
+        wheels_on: bool,
+        ws: [f32; 3],
+        wm: [f32; 3],
+        wh_rgb: [f32; 3],
+        ls: f32,
+        lm: f32,
+        lh: f32,
         gpu_capable: bool,
     },
 }
@@ -206,6 +244,7 @@ pub const GPU_EFFECTS: &[&str] = &[
     "tint",
     "black_white",
     "color_balance",
+    "three_way_color",
     "leave_color",
     "change_to_color",
     "color_pass",
@@ -219,6 +258,7 @@ pub const GPU_EFFECTS: &[&str] = &[
     "camera_blur",
     "directional_blur",
     "directional_blur_legacy",
+    "bokeh_blur",
     "sharpen",
     "unsharp_mask",
     "crop",
@@ -259,6 +299,13 @@ fn minifies(m: &Affine, w: usize, h: usize) -> bool {
 }
 
 impl FxOp {
+    /// A Three-Way Color Corrector with neutral controls (and any other op: false): it leaves the
+    /// image untouched, HDR values included.
+    pub fn is_identity_three_way(&self) -> bool {
+        matches!(self, FxOp::ThreeWay { sh, md, hi, sat, .. }
+            if [sh, md, hi].iter().all(|w| w.iter().all(|v| *v == 0.0)) && *sat == 1.0)
+    }
+
     /// Evaluate `e` at `cx.t` for a `w`×`h` working image. None for effects without a GPU
     /// implementation (and for disabled effects).
     pub fn eval(e: &EffectInstance, cx: &FxCtx, w: usize, h: usize) -> Option<FxOp> {
@@ -285,6 +332,30 @@ impl FxOp {
                     md: [g("mid_r"), g("mid_g"), g("mid_b")],
                     hi: [g("hi_r"), g("hi_g"), g("hi_b")],
                     preserve: b(e, "preserve"),
+                }
+            }
+            "three_way_color" => {
+                // a wheel: its hue as an RGB direction without the grey component, scaled by Balance
+                let wheel = |hue: &str, bal: &str, lvl: &str| {
+                    let h = f(e, hue, cx).rem_euclid(360.0) / 360.0;
+                    let c = filmcraft_color::hsl_to_rgb(h, 1.0, 0.5);
+                    let m = (c[0] + c[1] + c[2]) / 3.0;
+                    let k = f(e, bal, cx).clamp(0.0, 100.0) / 100.0 * 0.5;
+                    [(c[0] - m) * k, (c[1] - m) * k, (c[2] - m) * k, f(e, lvl, cx) / 100.0 * 0.25]
+                };
+                // the edges of a range: the threshold ± half its softness, on 0..1 luma
+                let edges = |thr: &str, soft: &str| {
+                    let (t, s) = (f(e, thr, cx).clamp(0.0, 100.0) / 100.0, f(e, soft, cx).clamp(0.0, 100.0) / 100.0 * 0.5);
+                    ((t - s).clamp(0.0, 1.0), (t + s).clamp(0.0, 1.0))
+                };
+                let (s0, s1) = edges("shadow_threshold", "shadow_softness");
+                let (h0, h1) = edges("hi_threshold", "hi_softness");
+                FxOp::ThreeWay {
+                    sh: wheel("shadow_hue", "shadow_balance", "shadow_level"),
+                    md: wheel("mid_hue", "mid_balance", "mid_level"),
+                    hi: wheel("hi_hue", "hi_balance", "hi_level"),
+                    range: [s0, s1, h0, h1],
+                    sat: f(e, "saturation", cx) / 100.0,
                 }
             }
             "leave_color" => {
@@ -354,6 +425,29 @@ impl FxOp {
                     FxOp::DirectionalBlur { dx: (dir.sin() as f32) * len, dy: (-dir.cos() as f32) * len, steps }
                 }
             }
+            "bokeh_blur" => {
+                let r = f(e, "amount", cx) * cx.px_scale;
+                if !r.is_finite() || r < 0.5 {
+                    return Some(FxOp::Bokeh { levels: 0, boost: 0.0, threshold: 0.0, sides: 0, rot: 0.0, rr: 0.0, rings: 0 });
+                }
+                // Large radii work on a halved (and halved again…) image: the result is smooth.
+                let (mut ww, mut wh, mut down, mut levels) = (w, h, 1.0f32, 0u32);
+                while r / down > 12.0 && ww >= 8 && wh >= 8 {
+                    (ww, wh) = ((ww / 2).max(1), (wh / 2).max(1));
+                    down *= 2.0;
+                    levels += 1;
+                }
+                let rr = r / down;
+                FxOp::Bokeh {
+                    levels,
+                    boost: f(e, "highlight", cx) / 100.0 * 6.0,
+                    threshold: f(e, "threshold", cx) / 100.0,
+                    sides: [0u32, 3, 4, 5, 6, 8][crate::vfx::chv(e, "shape").min(5) as usize],
+                    rot: f(e, "rotation", cx).to_radians(),
+                    rr,
+                    rings: (rr.ceil() as usize).clamp(1, 12) as u32,
+                }
+            }
             "sharpen" => {
                 // below a sigma of ~0.58 the three boxes all round to radius 0 and the mask is a
                 // no-op, so Sharpen vanished at 1/2 playback resolution and below (#1351)
@@ -389,6 +483,12 @@ impl FxOp {
                 FxOp::crop_rect(w, h, 0.0, 0.0, 0.0, 0.0, amt)
             }
             "transform" => {
+                // With its own shutter angle the CPU blurs the motion over seven samples
+                // (`vfx::distort::transform_fx`, under the same condition); the GPU op places one
+                // picture, so this stays on the CPU rather than losing the blur
+                if crate::vfx::bv(e, "shutter_override") && crate::vfx::fv(e, "shutter_angle", cx) > 0.5 {
+                    return None;
+                }
                 let img = Image { w, h, px: Vec::new() };
                 let anchor = point(e, "anchor", cx, &img);
                 let pos = point(e, "position", cx, &img);
@@ -509,7 +609,14 @@ impl FxOp {
                 let has_input_lut = basic_on && !text(e, "input_lut").is_empty();
                 let has_look_lut = creative_on && !text(e, "look_lut").is_empty();
                 let look = if creative_on && !has_look_lut { choice(e, "look") } else { 0 };
+                let look_k = if creative_on { f(e, "look_intensity", cx) / 100.0 } else { 0.0 };
                 let sharpen = if creative_on { f(e, "sharpen", cx) / 100.0 } else { 0.0 };
+                let (sharpen_rx, sharpen_ry) = if creative_on && sharpen.abs() > 1e-3 {
+                    let r = 1.2 * cx.px_scale.max(0.35);
+                    gaussian_boxes(w, h, r, r)
+                } else {
+                    (Vec::new(), Vec::new())
+                };
 
                 let curves_on = on(e, "curves_on");
                 let has_curves = curves_on && {
@@ -520,16 +627,34 @@ impl FxOp {
                 };
 
                 let wheels_on = on(e, "wheels_on");
-                let has_wheels = wheels_on && {
+                let (ws, wm, wh_rgb, ls, lm, lh) = if wheels_on {
                     let v2 = |id: &str| e.param(id).map(|p| p.vec2_at(cx.t)).unwrap_or_default();
-                    let (ws, wm, wh) = (wheel_rgb(v2("wheel_shadows")), wheel_rgb(v2("wheel_midtones")), wheel_rgb(v2("wheel_highlights")));
+                    let (ws, wm, wh_rgb) = (wheel_rgb(v2("wheel_shadows")), wheel_rgb(v2("wheel_midtones")), wheel_rgb(v2("wheel_highlights")));
                     let (ls, lm, lh) = (f(e, "wheel_shadows_l", cx) / 100.0, f(e, "wheel_midtones_l", cx) / 100.0, f(e, "wheel_highlights_l", cx) / 100.0);
-                    ws.iter().chain(&wm).chain(&wh).any(|v| v.abs() > 1e-5) || (ls.abs() + lm.abs() + lh.abs() > 1e-5)
+                    (ws, wm, wh_rgb, ls, lm, lh)
+                } else {
+                    ([0.0; 3], [0.0; 3], [0.0; 3], 0.0, 0.0, 0.0)
                 };
 
                 let hsl_on = b(e, "hsl_on");
 
-                let gpu_capable = !is_hdr && !has_input_lut && !has_look_lut && look == 0 && sharpen.abs() <= 1e-3 && !has_curves && !has_wheels && !hsl_on;
+                let input_lut_3d = if has_input_lut {
+                    crate::luts::resolve(cx.project, text(e, "input_lut")).and_then(|l| l.baked_cube(33).ok()).map(Arc::new)
+                } else {
+                    None
+                };
+                let look_lut_3d = if has_look_lut {
+                    crate::luts::resolve(cx.project, text(e, "look_lut")).and_then(|l| l.baked_cube(33).ok()).map(Arc::new)
+                } else {
+                    None
+                };
+
+                let gpu_capable = !is_hdr
+                    && (!has_input_lut || input_lut_3d.is_some())
+                    && (!has_look_lut || look_lut_3d.is_some())
+                    && look <= 8
+                    && !has_curves
+                    && !hsl_on;
 
                 let bf = |id: &str| if basic_on { f(e, id, cx) } else { 0.0 };
                 let temp = bf("temperature") / 100.0;
@@ -553,6 +678,8 @@ impl FxOp {
                 let aspect = if h > 0 { (w as f32 / h as f32).max(1e-4) } else { 1.0 };
 
                 FxOp::Lumetri {
+                    input_lut: input_lut_3d,
+                    look_lut: look_lut_3d,
                     gains,
                     exposure,
                     contrast,
@@ -572,6 +699,18 @@ impl FxOp {
                     vround,
                     vfeather,
                     aspect,
+                    look,
+                    look_k,
+                    sharpen,
+                    sharpen_rx,
+                    sharpen_ry,
+                    wheels_on,
+                    ws,
+                    wm,
+                    wh_rgb,
+                    ls,
+                    lm,
+                    lh,
                     gpu_capable,
                 }
             }
@@ -595,6 +734,7 @@ impl FxOp {
             FxOp::Tint { black, white, amount } => fin(black) && fin(white) && amount.is_finite(),
             FxOp::BlackWhite | FxOp::HFlip | FxOp::VFlip => true,
             FxOp::ColorBalance { sh, md, hi, .. } => fin(sh) && fin(md) && fin(hi),
+            FxOp::ThreeWay { sh, md, hi, range, sat } => fin(sh) && fin(md) && fin(hi) && fin(range) && sat.is_finite(),
             FxOp::LeaveColor { amount, key_hue, tol, soft } => fin(&[*amount, *key_hue, *tol, *soft]),
             FxOp::ChangeToColor { from_hue, to_hue, tol, soft } => fin(&[*from_hue, *to_hue, *tol, *soft]),
             FxOp::ColorPass { key, sim, .. } => fin(key) && sim.is_finite(),
@@ -605,6 +745,7 @@ impl FxOp {
             FxOp::Posterize { n } => n.is_finite(),
             FxOp::Gaussian { .. } => true,
             FxOp::DirectionalBlur { dx, dy, .. } => fin(&[*dx, *dy]),
+            FxOp::Bokeh { boost, threshold, sides, rot, rr, rings, .. } => fin(&[*boost, *threshold, *rot, *rr]) && *sides <= 8 && *rings <= 12,
             FxOp::Unsharp { amount, threshold, .. } => fin(&[*amount, *threshold]),
             FxOp::Crop { x0, x1, y0, y1, feather } => fin(&[*x0, *x1, *y0, *y1, *feather]),
             FxOp::Resample(r) => {
@@ -620,13 +761,45 @@ impl FxOp {
             FxOp::AlphaAdjust { opacity, .. } => opacity.is_finite(),
             FxOp::Vignette { amount, midpoint, roundness, feather, target } => fin(&[*amount, *midpoint, *roundness, *feather]) && fin(target),
             FxOp::VideoLimiter { max, comp, axis, warning_color, .. } => *axis <= 3 && max.is_finite() && comp.is_finite() && fin(warning_color),
-            FxOp::Lumetri { gains, exposure, contrast, hl, sh, wh, bl, sat, faded, vib, st, ht, va, vmid, vround, vfeather, aspect, gpu_capable, .. } => {
+            FxOp::Lumetri {
+                gains,
+                exposure,
+                contrast,
+                hl,
+                sh,
+                wh,
+                bl,
+                sat,
+                faded,
+                vib,
+                st,
+                ht,
+                va,
+                vmid,
+                vround,
+                vfeather,
+                aspect,
+                look_k,
+                sharpen,
+                ws,
+                wm,
+                wh_rgb,
+                ls,
+                lm,
+                lh,
+                gpu_capable,
+                ..
+            } => {
                 *gpu_capable
                     && fin(gains)
-                    && fin(&[*exposure, *contrast, *hl, *sh, *wh, *bl, *sat, *faded, *vib])
+                    && fin(&[*exposure, *contrast, *hl, *sh, *wh, *bl, *sat, *faded, *vib, *look_k, *sharpen])
                     && fin(st)
                     && fin(ht)
                     && fin(&[*va, *vmid, *vround, *vfeather, *aspect])
+                    && fin(ws)
+                    && fin(wm)
+                    && fin(wh_rgb)
+                    && fin(&[*ls, *lm, *lh])
             }
         }
     }
@@ -686,6 +859,35 @@ impl FxOp {
                         o = o.map(|v| v + d);
                     }
                     dec(o)
+                });
+            }
+            FxOp::ThreeWay { sh, md, hi, range, sat } => {
+                if self.is_identity_three_way() {
+                    return;
+                }
+                let (sh, md, hi, range, sat) = (*sh, *md, *hi, *range, *sat);
+                let ramp = |l: f32, lo: f32, hi: f32| {
+                    let t = ((l - lo) / (hi - lo).max(1e-4)).clamp(0.0, 1.0);
+                    t * t * (3.0 - 2.0 * t)
+                };
+                img.map_rgb(|c, _, _| {
+                    let e = enc(c);
+                    let l = 0.2126 * e[0] + 0.7152 * e[1] + 0.0722 * e[2];
+                    let (mut ws, mut wh) = (1.0 - ramp(l, range[0], range[1]), ramp(l, range[2], range[3]));
+                    // overlapping ranges (shadow edge above the highlight edge) share the pixel: weights sum to 1
+                    let wm = (1.0 - ws - wh).max(0.0);
+                    let total = ws + wm + wh;
+                    ws /= total;
+                    wh /= total;
+                    let wm = wm / total;
+                    let lvl = sh[3] * ws + md[3] * wm + hi[3] * wh;
+                    let mut o = [0.0; 3];
+                    for k in 0..3 {
+                        o[k] = e[k] + sh[k] * ws + md[k] * wm + hi[k] * wh + lvl;
+                    }
+                    let l2 = 0.2126 * o[0] + 0.7152 * o[1] + 0.0722 * o[2];
+                    // decoded without the upper clamp: values above 1 (HDR) keep their headroom
+                    o.map(|v| filmcraft_color::srgb_to_linear((l2 + (v - l2) * sat).max(0.0)))
                 });
             }
             FxOp::LeaveColor { amount, key_hue, tol, soft } => {
@@ -778,6 +980,11 @@ impl FxOp {
             }
             FxOp::Gaussian { rx, ry, repeat } => crate::effects::box_blur(img, rx, ry, *repeat),
             FxOp::DirectionalBlur { dx, dy, steps } => crate::effects::directional_taps(img, *dx, *dy, *steps as usize),
+            FxOp::Bokeh { levels, boost, threshold, sides, rot, rr, rings } => {
+                if *rings > 0 {
+                    crate::vfx::bokeh(img, *levels, *boost, *threshold, *sides, *rot, *rr, *rings);
+                }
+            }
             FxOp::Unsharp { rx, ry, amount, threshold } => crate::effects::unsharp_boxes(img, rx, ry, *amount, *threshold),
             FxOp::Crop { x0, x1, y0, y1, feather } => crate::effects::crop_px(img, *x0, *x1, *y0, *y1, *feather),
             FxOp::Resample(r) => {
@@ -923,6 +1130,8 @@ impl FxOp {
                 });
             }
             FxOp::Lumetri {
+                input_lut,
+                look_lut,
                 gains,
                 exposure,
                 contrast,
@@ -942,14 +1151,33 @@ impl FxOp {
                 vround,
                 vfeather,
                 aspect,
+                look,
+                look_k,
+                sharpen,
+                sharpen_rx,
+                sharpen_ry,
+                wheels_on,
+                ws,
+                wm,
+                wh_rgb,
+                ls,
+                lm,
+                lh,
                 ..
             } => {
+                let (input_lut, look_lut) = (input_lut.as_deref(), look_lut.as_deref());
                 let gains = *gains;
                 let (exposure, contrast, hl, sh, wh, bl, sat) = (*exposure, *contrast, *hl, *sh, *wh, *bl, *sat);
                 let (creative_on, faded, vib, st, ht) = (*creative_on, *faded, *vib, *st, *ht);
                 let (vignette_on, va, vmid, vround, vfeather, aspect) = (*vignette_on, *va, *vmid, *vround, *vfeather, *aspect);
+                let (look, look_k, sharpen) = (*look, *look_k, *sharpen);
+                let (wheels_on, ws, wm, wh_rgb, ls, lm, lh) = (*wheels_on, *ws, *wm, *wh_rgb, *ls, *lm, *lh);
                 let (w, h) = (img.w as f32, img.h as f32);
                 img.map_rgb(|c, x, y| {
+                    let c = match input_lut {
+                        Some(l) => dec(l.apply(enc(c))),
+                        None => c,
+                    };
                     // white balance + exposure in linear light
                     let lin = [c[0] * gains[0] * exposure, c[1] * gains[1] * exposure, c[2] * gains[2] * exposure];
                     let mut v = enc(lin);
@@ -959,13 +1187,12 @@ impl FxOp {
                     v = v.map(|q| (q - b0) / (w0 - b0).max(1e-3));
                     // highlights / shadows: luma-weighted lift/compress, hue preserving
                     let l = 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
-                    let ws = (1.0 - l).clamp(0.0, 1.0).powi(3);
+                    let ws_term = (1.0 - l).clamp(0.0, 1.0).powi(3);
                     let whl = l.clamp(0.0, 1.0).powi(3);
-                    let nl = (l + sh * 0.35 * ws + hl * 0.35 * whl).max(0.0);
-                    if l > 1e-5 {
-                        let k = nl / l;
-                        v = v.map(|q| q * k);
-                    }
+                    let nl = (l + sh * 0.35 * ws_term + hl * 0.35 * whl).max(0.0);
+                    // #2094: below LIFT_LUMA_FLOOR the hue-preserving scale is held and the rest is added equally
+                    let (k, add) = lift_scale(l, nl);
+                    v = v.map(|q| q * k + add);
                     // contrast: smooth S-curve around mid grey
                     if contrast.abs() > 1e-4 {
                         let k = 1.0 + contrast;
@@ -1001,14 +1228,45 @@ impl FxOp {
                         let k = 1.0 + va * 0.2 * e2;
                         v = v.map(|q| if va < 0.0 { q * k.max(0.0) } else { q + (1.0 - q) * (k - 1.0) });
                     }
-                    dec(v)
+                    if let Some(l) = look_lut {
+                        if look_k.abs() > 1e-5 {
+                            let mut v2 = enc(dec(v));
+                            let lk = l.apply(v2);
+                            v2 = [v2[0] + (lk[0] - v2[0]) * look_k, v2[1] + (lk[1] - v2[1]) * look_k, v2[2] + (lk[2] - v2[2]) * look_k];
+                            v = v2;
+                        }
+                    } else if look > 0 && look <= 8 && look_k.abs() > 1e-5 {
+                        let mut v2 = enc(dec(v));
+                        let lk = crate::effects::apply_look(look, v2);
+                        v2 = [v2[0] + (lk[0] - v2[0]) * look_k, v2[1] + (lk[1] - v2[1]) * look_k, v2[2] + (lk[2] - v2[2]) * look_k];
+                        v = v2;
+                    }
+                    let wheels_active = wheels_on && (ws.iter().chain(&wm).chain(&wh_rgb).any(|val| val.abs() > 1e-5) || (ls.abs() + lm.abs() + lh.abs() > 1e-5));
+                    if wheels_active {
+                        let mut v2 = enc(dec(v));
+                        let l = (0.2126 * v2[0] + 0.7152 * v2[1] + 0.0722 * v2[2]).clamp(0.0, 1.0);
+                        let wsh = (1.0 - l).powi(2);
+                        let whi = l * l;
+                        let wmid = (1.0 - wsh - whi).max(0.0);
+                        for k in 0..3 {
+                            v2[k] += (ws[k] * 0.3 + ls * 0.3) * wsh;
+                            v2[k] += (wm[k] * 0.3 + lm * 0.3) * wmid;
+                            v2[k] *= 1.0 + (wh_rgb[k] * 0.5 + lh * 0.5) * whi;
+                        }
+                        dec(v2)
+                    } else {
+                        dec(v)
+                    }
                 });
+                if sharpen.abs() > 1e-3 && !sharpen_rx.is_empty() {
+                    crate::effects::unsharp_boxes(img, sharpen_rx, sharpen_ry, sharpen.max(-1.0), 0.0);
+                }
             }
         }
     }
 }
 
-/// Horizontal scale of the Lumetri vignette's coordinates for a Roundness of `vround`
+/// Horizontal scale of the Color Grading vignette's coordinates for a Roundness of `vround`
 /// (−1 … 1) on a frame `aspect` wide. At 0 the vignette is an ellipse that follows the
 /// frame; positive values move it towards a circle (1 = a true circle), negative values
 /// stretch it into a wider oval. Non-finite or out-of-range input never yields NaN.
@@ -1149,5 +1407,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Transform with its own shutter angle blurs the motion on the CPU
+    /// (`vfx::distort::transform_fx`). The GPU op has no such blur, so that effect must leave
+    /// the GPU chain instead of silently losing its blur in the Program monitor and GPU exports.
+    #[test]
+    fn transform_with_its_own_shutter_angle_stays_on_the_cpu() {
+        let cx = FxCtx {
+            t: Tick::ZERO,
+            px_scale: 1.0,
+            seconds: 0.0,
+            timecode: "",
+            clip_name: "",
+            project: None,
+            env: None,
+            frame_rate: 24.0,
+            working: filmcraft_color::WorkingSpace::Rec709,
+        };
+        let on_gpu = |e: &EffectInstance| FxOp::eval(e, &cx, 64, 36).is_some_and(|op| op.gpu_ok());
+        let mut e = find_effect("transform").unwrap().instance();
+        e.params.get_mut("position").unwrap().value = ParamValue::Vec2(filmcraft_geom::Vec2::new(40.0, 20.0));
+        assert!(on_gpu(&e), "a plain transform runs on the GPU");
+        e.params.get_mut("shutter_override").unwrap().value = ParamValue::Bool(true);
+        assert!(!on_gpu(&e), "the default 180° shutter blurs the motion: CPU");
+        e.params.get_mut("shutter_angle").unwrap().value = ParamValue::Float(0.0);
+        assert!(on_gpu(&e), "a closed shutter blurs nothing");
+        e.params.get_mut("shutter_override").unwrap().value = ParamValue::Bool(false);
+        e.params.get_mut("shutter_angle").unwrap().value = ParamValue::Float(360.0);
+        assert!(on_gpu(&e), "the angle counts only with the override");
     }
 }

@@ -1,0 +1,41 @@
+name: Windows Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [release, update-0.16.0, main]
+
+jobs:
+  windows-package:
+    name: Package Windows (${{ matrix.arch }})
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        arch: [x64]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install WiX v5
+        run: dotnet tool install --global wix --version 5.0.2
+
+      - name: Package Windows MSI and Portable ZIP
+        shell: pwsh
+        run: |
+          pwsh packaging/windows/package.ps1 -Arch ${{ matrix.arch }}
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: filmcraft-windows-${{ matrix.arch }}
+          path: |
+            dist/release/filmcraft-*.msi
+            dist/release/filmcraft-*.zip

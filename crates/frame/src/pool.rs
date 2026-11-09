@@ -11,7 +11,7 @@
 //! frame they cost a zero-fill and fresh page faults every time.
 //!
 //! The shelves are sized for the busiest work, so they are a lot to keep once it is over: whoever
-//! finishes such work (a standalone export) calls [`trim_f32`].
+//! finishes such work (a standalone export) calls [`trim_f32`] and [`trim_planes`].
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -52,12 +52,11 @@ impl<T> Shelf<T> {
         Some(b)
     }
 
-    fn give(&mut self, mut b: Vec<T>, max_bytes: usize) {
+    fn give(&mut self, b: Vec<T>, max_bytes: usize) {
         let n = Self::size(&b);
         if n < MIN_BYTES || self.bytes.saturating_add(n) > max_bytes {
             return;
         }
-        b.clear();
         self.bytes += n;
         self.bufs.push(b);
     }
@@ -77,7 +76,8 @@ const F32_MAX_BYTES: usize = 320 << 20;
 fn take<T>(shelf: &Mutex<Shelf<T>>, len: usize) -> Vec<T> {
     let found = shelf.lock().unwrap_or_else(PoisonError::into_inner).take(len);
     match found {
-        Some(b) => {
+        Some(mut b) => {
+            b.clear();
             REUSED.fetch_add(1, Ordering::Relaxed);
             b
         }
@@ -100,6 +100,38 @@ pub fn take_u8(len: usize) -> Vec<u8> {
 /// [`take_u8`] for 16-bit planes.
 pub fn take_u16(len: usize) -> Vec<u16> {
     take(&U16, len)
+}
+
+/// A buffer of `len` bytes whose contents are unspecified when recycled (the caller overwrites
+/// every element). Avoids zero-filling recycled plane buffers before overwriting them.
+pub fn take_u8_overwritten(len: usize) -> Vec<u8> {
+    let found = U8.lock().unwrap_or_else(PoisonError::into_inner).take(len);
+    match found {
+        Some(mut b) => {
+            b.resize(len, 0);
+            REUSED.fetch_add(1, Ordering::Relaxed);
+            b
+        }
+        None => vec![0u8; len],
+    }
+}
+
+/// [`take_u8_overwritten`] for 16-bit planes.
+pub fn take_u16_overwritten(len: usize) -> Vec<u16> {
+    let found = U16.lock().unwrap_or_else(PoisonError::into_inner).take(len);
+    match found {
+        Some(mut b) => {
+            b.resize(len, 0);
+            REUSED.fetch_add(1, Ordering::Relaxed);
+            b
+        }
+        None => vec![0u16; len],
+    }
+}
+
+/// Hand back a byte buffer (such as a prepared half-float upload plane) nobody needs any more.
+pub fn give_u8(plane: Arc<Vec<u8>>) {
+    give(&U8, plane);
 }
 
 /// A buffer of exactly `len` floats whose contents are unspecified (whatever it held last, or zeros
@@ -144,11 +176,22 @@ pub fn recycle(frame: Arc<VideoFrame>) {
 /// Free the idle float images. A standalone export leaves that shelf full (up to [`F32_MAX_BYTES`]
 /// of images, each the size of that export's frames) and nothing else asks for those sizes again,
 /// so they would sit idle until the next export. Images still in use are not touched. The 8- and
-/// 16-bit plane shelves are left alone: playback recycles decoded frames through them all the time.
+/// 16-bit plane shelves are left alone: playback recycles decoded frames through them all the time
+/// (see [`trim_planes`] for the end of such work).
 pub fn trim_f32() {
     // taken under the lock, freed after it: giving back hundreds of megabytes takes a moment
     let floats = std::mem::take(&mut *F32.lock().unwrap_or_else(PoisonError::into_inner));
     drop(floats);
+}
+
+/// Free the idle 8- and 16-bit plane buffers (up to [`MAX_BYTES`] each). A standalone export leaves
+/// both shelves full of planes the size of its sources' pictures, and nothing trims them. Planes
+/// still in use are not touched, and the shelves fill again as soon as decoding resumes.
+pub fn trim_planes() {
+    // taken under the lock, freed after it: giving back hundreds of megabytes takes a moment
+    let u8s = std::mem::replace(&mut *U8.lock().unwrap_or_else(PoisonError::into_inner), Shelf::new());
+    let u16s = std::mem::replace(&mut *U16.lock().unwrap_or_else(PoisonError::into_inner), Shelf::new());
+    drop((u8s, u16s));
 }
 
 /// Idle buffers held and buffers handed out again so far (`perf.stats`).
